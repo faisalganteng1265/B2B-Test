@@ -88,6 +88,15 @@ describe('schema invariants', () => {
     ).rejects.toThrow();
   });
 
+  it('allows only orphaned -> seen (tx re-included after a reorg)', async () => {
+    const d = await insertDeposit(4);
+    await h.db.update(deposits).set({ status: 'orphaned' }).where(eq(deposits.id, d.id));
+    await h.db.update(deposits).set({ status: 'seen' }).where(eq(deposits.id, d.id));
+    await expect(
+      h.db.update(deposits).set({ status: 'dispatched' }).where(eq(deposits.id, d.id)),
+    ).rejects.toThrow();
+  });
+
   it('forbids skipping confirmation (seen -> dispatched)', async () => {
     const d = await insertDeposit(3);
     await expect(

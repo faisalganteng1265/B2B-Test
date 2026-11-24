@@ -5,13 +5,14 @@ const VIEM_CHAINS = { 84532: baseSepolia, 8453: base } as const;
 
 /**
  * Public client with multi-RPC failover: viem `fallback()` tries transports in order and moves to
- * the next on error; `rank` periodically re-orders them by latency/stability. Each transport
- * retries with exponential backoff before falling over.
+ * the next on error. Each transport retries with exponential backoff before falling over, and
+ * coalesces concurrent calls into one JSON-RPC batch request (the live indexer fetches headers and
+ * logs for many blocks in parallel).
  */
 export function createChainClient(
   chainId: number,
   rpcUrls: string[],
-  opts: { timeoutMs?: number; retryCount?: number } = {},
+  opts: { timeoutMs?: number; retryCount?: number; batchSize?: number } = {},
 ): PublicClient {
   const chain = VIEM_CHAINS[chainId as keyof typeof VIEM_CHAINS];
   if (!chain) throw new Error(`unsupported chainId ${chainId}`);
@@ -20,7 +21,7 @@ export function createChainClient(
       timeout: opts.timeoutMs ?? 10_000,
       retryCount: opts.retryCount ?? 3,
       retryDelay: 250,
-      batch: false,
+      batch: { batchSize: opts.batchSize ?? 50, wait: 5 },
     }),
   );
   return createPublicClient({

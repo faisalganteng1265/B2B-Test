@@ -35,7 +35,9 @@ export const envFields = {
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   CHAIN: z.enum(['base-sepolia', 'base']).default('base-sepolia'),
-  RPC_URLS: csv.pipe(z.array(z.url()).min(1)).default(['https://sepolia.base.org']),
+  RPC_URLS: csv
+    .pipe(z.array(z.url()).min(1))
+    .default(['https://base-sepolia-rpc.publicnode.com', 'https://sepolia.base.org']),
   DATABASE_URL: z.string().default('postgres://postgres@localhost:5432/mopay'),
   RESTATE_INGRESS_URL: z.url().default('http://localhost:8080'),
   RESTATE_ADMIN_URL: z.url().default('http://localhost:9070'),

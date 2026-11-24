@@ -16,6 +16,8 @@ export interface ChainConfig {
    * The indexer always takes the MORE conservative (lower) of the two when both are available.
    */
   finality: 'tag' | 'distance';
+  /** Which block tag counts as final: `safe` (L2 data posted to L1) or `finalized` (L1 finalized). */
+  finalityTag: 'safe' | 'finalized';
   reorgSafeDistance: number;
   explorerTxUrl: (hash: string) => string;
 }
@@ -24,17 +26,21 @@ export const CHAINS: Record<ChainName, ChainConfig> = {
   'base-sepolia': {
     name: 'base-sepolia',
     chainId: 84532,
-    blockTimeMs: 2000,
-    finality: 'distance',
-    reorgSafeDistance: 30,
+    // Measured Nov 2026: ~5 blocks/s; `safe` trails head by ~600 blocks (~2 min),
+    // `finalized` by ~4,800 (~16 min).
+    blockTimeMs: 200,
+    finality: 'tag',
+    finalityTag: 'safe',
+    reorgSafeDistance: 150,
     explorerTxUrl: (h) => `https://sepolia.basescan.org/tx/${h}`,
   },
   base: {
     name: 'base',
     chainId: 8453,
-    blockTimeMs: 2000,
+    blockTimeMs: 200,
     finality: 'tag',
-    reorgSafeDistance: 60,
+    finalityTag: 'finalized',
+    reorgSafeDistance: 300,
     explorerTxUrl: (h) => `https://basescan.org/tx/${h}`,
   },
 };

@@ -30,3 +30,6 @@ mobee:           ## run mobee-mock (port 4100)
 
 bifast:          ## run bifast-mock (port 4200)
 	pnpm --filter @mopay/bifast-mock start
+
+indexer:         ## run the indexer (port 4300: /healthz /readyz /metrics /status)
+	pnpm --filter @mopay/indexer start

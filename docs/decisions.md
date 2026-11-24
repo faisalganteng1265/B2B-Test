@@ -81,3 +81,49 @@ The app validates journals before posting, but the database is the last line of 
   the data is older than 60 s.
 - **Mobee signature path** = `pathname + search` (query string included), body included for POST/PUT.
 - **Closed account** `002/9990000001` exists in the mock bank directory to demo a final bank reject.
+
+## ADR-008 — Indexer finality on Base: `safe` tag + distance floor
+**Measured on Base Sepolia (Nov 2026):** about 5 blocks/s; the `safe` tag trails head by ~600 blocks
+(~2 min, meaning the L2 batch has been posted to L1); `finalized` trails by ~4,800 blocks (~16 min, meaning L1 finalized).
+**Decision.** `finalizedBoundary = min(head − REORG_SAFE_DISTANCE, tag)`, i.e. always the more
+conservative rule. Base Sepolia uses tag=`safe` and distance=150. Base mainnet uses tag=`finalized`
+and distance=300. Both can be overridden with `FINALITY_MODE`, `FINALITY_TAG`, `REORG_SAFE_DISTANCE`.
+A Base reorg below `safe` requires an L1 reorg, so `safe` is an acceptable demo/testnet trade-off;
+production mainnet uses `finalized` (see docs/production.md).
+**Observed:** detection 0.8 s after the receipt; `confirmed` ~105 s after the receipt.
+
+## ADR-009 — Live path: batched headers + one validated range getLogs
+At ~5 blocks/s, a per-block live worker (≈430 ms RPC latency) cannot keep up, and per-block
+`getLogs({blockHash})` is about 10× slower than a range query on public RPCs (measured: 50 blocks →
+11.8 s by hash vs ≈330 ms by range). The live worker therefore:
+1. fetches up to `LIVE_BATCH` (25) headers in one JSON-RPC batch and keeps the longest prefix
+   that forms a parent-hash chain from the checkpoint (a mismatch at the first block means a reorg,
+   which triggers the walk back to the common ancestor);
+2. runs one range `getLogs` over that prefix and **requires every log's `blockHash` to equal the
+   validated header at its height**. Any mismatch discards the batch, so headers and logs can
+   never come from different forks;
+3. writes blocks, deposits and the checkpoint in one transaction (optimistic concurrency on the
+   previous live head).
+The residual risk is a lagging node behind a load balancer silently returning *fewer* logs. That is
+covered by **final-range sweeps**: once a full chunk behind the live head is final, it is
+re-scanned through the backfill machinery. A deposit can therefore be delayed until finality but never lost.
+Sweeps are tested by simulating exactly that lagging node.
+
+## ADR-010 — RPC providers
+`sepolia.base.org` enforces 25 req/s and `eth_getLogs` ranges ≤ 200 blocks (`-32614`).
+publicnode handles 100-call batches and 2,000-block ranges. Order: publicnode first, base.org as
+the viem `fallback()`. The adaptive range splitter recognises the `-32614` message, so failover to
+base.org still works.
+
+## ADR-011 — Indexer HA: advisory-lock leader + SKIP LOCKED backfill
+Live worker, promoter, outbox dispatcher and housekeeping run only on the replica holding
+`pg_try_advisory_lock(hashtext('mopay-indexer-live:<chainId>'))` on a dedicated session. If it dies,
+the session ends and a standby takes over within ~3 s. Backfill workers run on every replica,
+claiming chunks with `FOR UPDATE SKIP LOCKED` plus a lease that is extended by a heartbeat. A crashed
+worker's chunk is re-claimed after the lease expires (tested). In addition, the checkpoint update
+uses optimistic concurrency, so even two "leaders" cannot both advance the head.
+
+## ADR-012 — Re-included transactions after a reorg
+Only `orphaned → seen` is allowed (migration 0002). A reorged deposit that reappears on the new
+branch must become final again before it can be dispatched, and it keeps its deterministic
+workflow id `{chainId}:{txHash}:{logIndex}`, so it can never run twice.
