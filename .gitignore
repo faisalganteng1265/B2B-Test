@@ -14,3 +14,4 @@ contracts/broadcast/
 contracts/lib/
 .restate/
 restate-data/
+apps/dashboard/next-env.d.ts

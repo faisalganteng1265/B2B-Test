@@ -1,0 +1,164 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/* Design tokens. Light is the base; dark is its own stepped set (not an automatic flip). */
+:root {
+  color-scheme: light;
+  --bg: #f6f6f4;
+  --surface: #fcfcfb;
+  --surface-2: #f0efec;
+  --surface-3: #e7e6e2;
+  --border: #e2e1dc;
+  --border-strong: #cfcec8;
+  --text: #0b0b0b;
+  --text-2: #52514e;
+  --muted: #7a7974;
+  --accent: #2a78d6;
+  --accent-soft: #e3eefc;
+  --accent-ink: #1c5cab;
+  --good: #0ca30c;
+  --good-ink: #006300;
+  --good-soft: #e5f4e3;
+  --warning: #fab219;
+  --warning-ink: #8a5a00;
+  --warning-soft: #fdf3da;
+  --serious: #ec835a;
+  --serious-ink: #a4421b;
+  --serious-soft: #fcebe3;
+  --critical: #d03b3b;
+  --critical-ink: #a42323;
+  --critical-soft: #fbe6e6;
+  --neutral-soft: #eeede9;
+  --grid: #ebeae6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme='light'])) {
+    color-scheme: dark;
+    --bg: #121211;
+    --surface: #1a1a19;
+    --surface-2: #222220;
+    --surface-3: #2c2c2a;
+    --border: #2e2e2b;
+    --border-strong: #3d3d39;
+    --text: #f0efec;
+    --text-2: #c3c2b7;
+    --muted: #8d8c85;
+    --accent: #3987e5;
+    --accent-soft: #17283d;
+    --accent-ink: #86b6ef;
+    --good-ink: #6fd46f;
+    --good-soft: #142914;
+    --warning-ink: #fcc95a;
+    --warning-soft: #2e2614;
+    --serious-ink: #f3a787;
+    --serious-soft: #321e16;
+    --critical-ink: #f08a8a;
+    --critical-soft: #331818;
+    --neutral-soft: #262624;
+    --grid: #262624;
+  }
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #121211;
+  --surface: #1a1a19;
+  --surface-2: #222220;
+  --surface-3: #2c2c2a;
+  --border: #2e2e2b;
+  --border-strong: #3d3d39;
+  --text: #f0efec;
+  --text-2: #c3c2b7;
+  --muted: #8d8c85;
+  --accent: #3987e5;
+  --accent-soft: #17283d;
+  --accent-ink: #86b6ef;
+  --good-ink: #6fd46f;
+  --good-soft: #142914;
+  --warning-ink: #fcc95a;
+  --warning-soft: #2e2614;
+  --serious-ink: #f3a787;
+  --serious-soft: #321e16;
+  --critical-ink: #f08a8a;
+  --critical-soft: #331818;
+  --neutral-soft: #262624;
+  --grid: #262624;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-ink: var(--text);
+  --color-ink-2: var(--text-2);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-ink: var(--accent-ink);
+  --color-good: var(--good);
+  --color-good-ink: var(--good-ink);
+  --color-good-soft: var(--good-soft);
+  --color-warning: var(--warning);
+  --color-warning-ink: var(--warning-ink);
+  --color-warning-soft: var(--warning-soft);
+  --color-serious: var(--serious);
+  --color-serious-ink: var(--serious-ink);
+  --color-serious-soft: var(--serious-soft);
+  --color-critical: var(--critical);
+  --color-critical-ink: var(--critical-ink);
+  --color-critical-soft: var(--critical-soft);
+  --color-neutral-soft: var(--neutral-soft);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-mono-face), ui-monospace, SFMono-Regular, monospace;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+body {
+  font-feature-settings: 'cv11', 'ss01';
+  -webkit-font-smoothing: antialiased;
+}
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+::selection {
+  background: var(--accent-soft);
+}
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--good) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.live-dot {
+  animation: pulse-ring 2s infinite;
+}
+@keyframes flash {
+  from {
+    background: var(--accent-soft);
+  }
+  to {
+    background: transparent;
+  }
+}
+.row-flash {
+  animation: flash 1.6s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-dot,
+  .row-flash {
+    animation: none;
+  }
+}

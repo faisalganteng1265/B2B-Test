@@ -6,6 +6,24 @@ deps:            ## install JS deps + foundry libs
 	cd contracts && [ -d lib/forge-std ] || forge install foundry-rs/forge-std --no-git
 	cd contracts && [ -d lib/openzeppelin-contracts ] || forge install OpenZeppelin/openzeppelin-contracts@v5.4.0 --no-git
 
+up:              ## start the whole stack natively (postgres must be running)
+	./scripts/stack.sh up
+
+down:            ## stop everything (graceful)
+	./scripts/stack.sh down
+
+status:          ## service status
+	./scripts/stack.sh status
+
+kill-%:          ## SIGKILL a service, e.g. make kill-workflow
+	./scripts/stack.sh kill $*
+
+restart-%:       ## (re)start a service, e.g. make restart-workflow
+	./scripts/stack.sh restart $*
+
+logs-%:          ## follow a service log
+	./scripts/stack.sh logs $*
+
 deploy:          ## deploy mock tokens to $$CHAIN (Base Sepolia), writes deployments/<chainId>.json
 	./scripts/deploy.sh
 
