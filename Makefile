@@ -1,5 +1,5 @@
 SHELL := /bin/bash
-.PHONY: deps up down reset deploy seed test test-contracts
+.PHONY: deps up down reset deploy seed migrate db-create test test-contracts
 
 deps:            ## install JS deps + foundry libs
 	pnpm install
@@ -14,3 +14,13 @@ test-contracts:
 
 test: test-contracts
 	pnpm test
+
+migrate:         ## apply DB migrations
+	pnpm db:migrate
+
+seed:            ## seed 2 demo clients (keys -> data/seed-clients.json)
+	pnpm db:seed
+
+db-create:       ## create local databases (native Postgres)
+	psql -h localhost -U postgres -tc "select 1 from pg_database where datname='mopay'" | grep -q 1 || psql -h localhost -U postgres -c 'create database mopay'
+	psql -h localhost -U postgres -tc "select 1 from pg_database where datname='mopay_test'" | grep -q 1 || psql -h localhost -U postgres -c 'create database mopay_test'

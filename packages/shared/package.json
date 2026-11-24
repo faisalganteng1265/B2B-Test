@@ -1,0 +1,19 @@
+{
+  "name": "@mopay/shared",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@mopay/config": "workspace:*",
+    "pino": "^10.4.0",
+    "viem": "^2.58.4",
+    "zod": "^4.6.7"
+  }
+}

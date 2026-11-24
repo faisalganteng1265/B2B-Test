@@ -26,3 +26,28 @@ is not exercised on this machine.
 ## ADR-003 — Node 26 instead of Node 22
 The machine runs Node 26. The code targets ES2023 and uses no Node-26-only APIs, so it should
 still run on Node 22 LTS (`engines: >=22`).
+
+## ADR-004 — Integer money, rounding in Mopay's favour
+Token amounts are `numeric(78,0)` base units, rupiah are `bigint` whole rupiah, and rates are
+integers "IDR per 1 token × 10⁶". No float ever touches money. The IDR a client receives is
+rounded **down**, fees are rounded **up**, and the VWAP when selling into the bid book is rounded
+**down**. Mopay can therefore never pay out more than the exchange actually credited.
+Implementation: `packages/shared/src/money.ts`; a property test checks `net + fee = gross`
+and `net ≤ gross`.
+
+## ADR-005 — Ledger and state invariants enforced in the database, too
+The app validates journals before posting, but the database is the last line of defence:
+- a deferred constraint trigger rejects any transaction that leaves a journal unbalanced per currency;
+- `ledger_entries` is append-only (UPDATE/DELETE raise);
+- each journal has a deterministic id (`<depositId>:<purpose>`) with a PK in `ledger_journals`,
+  so a retried workflow step cannot double-post;
+- a trigger on `deposits.status` enforces the state machine. In particular, `orphaned` is
+  terminal and `seen → dispatched` is illegal, so a deposit hit by a reorg can never be dispatched,
+  even through a bug in application code.
+Postgres 18 (native on this machine) is used instead of 16; nothing version-specific is used.
+
+## ADR-006 — Extra tables beyond the spec
+- `offramp_step_events`: an append-only timeline (started/succeeded/retrying/failed per step,
+  with attempt number and error) that backs the dashboard's per-deposit timeline.
+- `ledger_journals`: the idempotency key for journal posting (see ADR-005).
+- `clients.api_key_prefix` / `api_key_salt`: O(1) key lookup without storing plaintext.
