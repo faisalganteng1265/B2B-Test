@@ -1,0 +1,53 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with: { version: v1.7.1 }
+      - name: forge deps
+        working-directory: contracts
+        run: |
+          forge install foundry-rs/forge-std --no-git
+          forge install OpenZeppelin/openzeppelin-contracts@v5.4.0 --no-git
+      - run: forge test -vv
+        working-directory: contracts
+
+  node:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_HOST_AUTH_METHOD: trust }
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://postgres@localhost:5432/mopay_test
+      SIM_DATABASE_URL: postgres://postgres@localhost:5432/mopay_sim
+      PRICE_SOURCE: fixed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 12.14.0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: psql -h localhost -U postgres -c 'create database mopay_test'
+      - name: lint
+        run: pnpm lint
+      - name: typecheck
+        run: pnpm -r typecheck
+      - name: unit + integration (indexer on simulated chain, workflow on real restate-server)
+        run: pnpm -r test
+      - name: reorg + catch-up demos (simulated chain)
+        run: |
+          npx tsx scripts/reorg-demo.ts
+          npx tsx scripts/catchup-sim.ts
+      - name: dashboard build
+        run: pnpm --filter @mopay/dashboard build

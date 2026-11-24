@@ -1,5 +1,5 @@
 SHELL := /bin/bash
-.PHONY: deps up down reset deploy seed migrate db-create test test-contracts
+.PHONY: deps up down reset deploy seed migrate db-create test test-unit test-contracts invariants e2e send-deposit burst demo-catchup demo-catchup-sim demo-reorg demo-chaos
 
 deps:            ## install JS deps + foundry libs
 	pnpm install
@@ -27,11 +27,46 @@ logs-%:          ## follow a service log
 deploy:          ## deploy mock tokens to $$CHAIN (Base Sepolia), writes deployments/<chainId>.json
 	./scripts/deploy.sh
 
+reset:           ## stop everything and wipe local state (DB, Restate journal, mock state). Keeps deployments/.
+	./scripts/stack.sh down
+	psql -h localhost -U postgres -c 'drop database if exists mopay' -c 'create database mopay'
+	rm -rf data/restate data/mobee.sqlite* data/bifast.sqlite* data/seed-clients.json data/logs data/pids
+
 test-contracts:
 	cd contracts && forge test
 
-test: test-contracts
-	pnpm test
+test: test-contracts   ## contracts + all unit/integration tests (needs local Postgres)
+	pnpm -r test
+
+lint:
+	pnpm lint && pnpm typecheck
+
+invariants:      ## check system invariants against the running stack
+	npx tsx scripts/invariants.ts
+
+send-deposit:    ## make send-deposit CLIENT=A AMOUNT=1000
+	npx tsx scripts/send-deposit.ts --client $${CLIENT:-A} --amount $${AMOUNT:-100}
+
+burst:           ## make burst COUNT=50
+	npx tsx scripts/burst.ts --count $${COUNT:-20}
+
+demo-catchup:    ## real chain: stop indexer, burst, stay down WAIT s, restart, watch catch-up
+	./scripts/catchup-demo.sh
+
+demo-catchup-sim: ## simulated chain: 50 deposits + 5000 blocks while down
+	npx tsx scripts/catchup-sim.ts
+
+demo-reorg:      ## simulated chain: reorged deposit -> orphaned, never paid
+	npx tsx scripts/reorg-demo.ts
+
+e2e:             ## chaos on + COUNT real deposits (default 100) → all complete → invariants
+	./scripts/e2e.sh
+
+demo-chaos:      ## storm chaos on both mocks + burst of real deposits
+	./scripts/demo-chaos.sh
+
+help:
+	@grep -E '^[a-z%-]+:.*## ' Makefile | sed 's/:.*## /\t/' | expand -t 20
 
 migrate:         ## apply DB migrations
 	pnpm db:migrate

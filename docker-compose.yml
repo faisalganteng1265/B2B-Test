@@ -1,0 +1,111 @@
+# Full stack in Docker. Chain = Base Sepolia (no local chain container; see docs/decisions.md ADR-001).
+# Contracts are already deployed: deployments/84532.json. To redeploy: `make deploy` (needs Foundry).
+# NOTE: authored for environments with Docker; the reference dev setup runs natively (`make up`).
+x-node: &node
+  build: .
+  image: mopay-prototype:local
+  env_file: .env
+  restart: unless-stopped
+  environment: &node-env
+    DATABASE_URL: postgres://postgres:postgres@postgres:5432/mopay
+    RESTATE_INGRESS_URL: http://restate:8080
+    RESTATE_ADMIN_URL: http://restate:9070
+    MOBEE_URL: http://mobee-mock:4100
+    BIFAST_URL: http://bifast-mock:4200
+    API_URL: http://api:4000
+    INDEXER_URL: http://indexer:4300
+    BIFAST_CALLBACK_URL: http://api:4000/webhooks/bifast
+    MOBEE_DB_PATH: /data/mobee.sqlite
+    BIFAST_DB_PATH: /data/bifast.sqlite
+    WORKFLOW_PUBLIC_URL: http://workflow:9080
+    LOG_LEVEL: info
+
+x-health: &health
+  interval: 5s
+  timeout: 3s
+  retries: 30
+  start_period: 10s
+
+services:
+  postgres:
+    image: postgres:16
+    environment: { POSTGRES_PASSWORD: postgres, POSTGRES_DB: mopay }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    ports: ['5432:5432']
+    healthcheck: { <<: *health, test: ['CMD-SHELL', 'pg_isready -U postgres'] }
+
+  restate:
+    image: docker.restate.dev/restatedev/restate:1.8.1
+    volumes: [restatedata:/restate-data]
+    ports: ['8080:8080', '9070:9070']
+    healthcheck: { <<: *health, test: ['CMD', 'curl', '-sf', 'http://localhost:9070/health'] }
+
+  mobee-mock:
+    <<: *node
+    command: pnpm --filter @mopay/mobee-mock start
+    volumes: [mockdata:/data]
+    ports: ['4100:4100']
+    healthcheck: { <<: *health, test: ['CMD', 'curl', '-sf', 'http://localhost:4100/healthz'] }
+
+  bifast-mock:
+    <<: *node
+    command: pnpm --filter @mopay/bifast-mock start
+    volumes: [mockdata:/data]
+    ports: ['4200:4200']
+    healthcheck: { <<: *health, test: ['CMD', 'curl', '-sf', 'http://localhost:4200/healthz'] }
+
+  workflow:
+    <<: *node
+    command: pnpm --filter @mopay/workflow start
+    depends_on: { postgres: { condition: service_healthy } }
+    healthcheck: { <<: *health, test: ['CMD-SHELL', 'bash -c "exec 3<>/dev/tcp/127.0.0.1/9080"'] }
+
+  # One-shot: migrate DB → register workflow deployment with Restate → seed clients.
+  init:
+    <<: *node
+    restart: 'no'
+    command: >
+      sh -c "pnpm db:migrate &&
+             pnpm --filter @mopay/workflow register http://workflow:9080 &&
+             pnpm db:seed"
+    depends_on:
+      postgres: { condition: service_healthy }
+      restate: { condition: service_healthy }
+      mobee-mock: { condition: service_healthy }
+      workflow: { condition: service_healthy }
+    healthcheck: { disable: true }
+
+  indexer:
+    <<: *node
+    command: pnpm --filter @mopay/indexer start
+    depends_on: { init: { condition: service_completed_successfully } }
+    ports: ['4300:4300']
+    healthcheck: { <<: *health, test: ['CMD', 'curl', '-sf', 'http://localhost:4300/healthz'] }
+
+  api:
+    <<: *node
+    command: pnpm --filter @mopay/api start
+    depends_on: { init: { condition: service_completed_successfully } }
+    ports: ['4000:4000']
+    healthcheck: { <<: *health, test: ['CMD', 'curl', '-sf', 'http://localhost:4000/healthz'] }
+
+  dashboard:
+    <<: *node
+    command: pnpm --filter @mopay/dashboard start
+    depends_on: { api: { condition: service_healthy } }
+    ports: ['3000:3000']
+    healthcheck: { <<: *health, test: ['CMD', 'curl', '-sf', 'http://localhost:3000/'] }
+
+  # Optional: redeploy the mock tokens (docker compose --profile deploy run --rm deploy)
+  deploy:
+    image: ghcr.io/foundry-rs/foundry:v1.7.1
+    profiles: [deploy]
+    env_file: .env
+    working_dir: /repo
+    volumes: ['./:/repo']
+    entrypoint: ['sh', '-c', 'cd contracts && forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts@v5.4.0 --no-git 2>/dev/null; FORCE=1 ../scripts/deploy.sh']
+
+volumes:
+  pgdata:
+  restatedata:
+  mockdata:
