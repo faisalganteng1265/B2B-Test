@@ -1,0 +1,5 @@
+contracts/lib
+contracts/out
+pnpm-lock.yaml
+**/drizzle/meta
+deployments

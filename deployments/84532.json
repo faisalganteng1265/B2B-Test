@@ -1,0 +1,13 @@
+{
+  "chainId": 84532,
+  "clientWallets": [
+    "0x9B22e0C2c5a06A747b6ab28b9693137b9d60818c",
+    "0xD1014c655bb8b4B1a44baA9A23B22FA4a4151925"
+  ],
+  "deployBlock": 62961128,
+  "deployer": "0x71b0C7a96EdAA59caeB614A329d256Ce9F12cC51",
+  "tokens": {
+    "USDC": "0x5dAAFe99ADddc4ecc309f9607ff418eE7a22e3eB",
+    "USDT": "0xd3dD2744A70188e5fdD17F302d1003E37E2dF7C0"
+  }
+}
