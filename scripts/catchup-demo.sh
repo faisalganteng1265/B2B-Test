@@ -10,7 +10,7 @@ WAIT=${WAIT:-300}
 COUNT=${COUNT:-50}
 export JUMP_THRESHOLD=${JUMP_THRESHOLD:-300} BACKFILL_CHUNK_SIZE=${BACKFILL_CHUNK_SIZE:-200}
 metric() { curl -s localhost:4300/metrics | awk -v m="$1" '$1==m {print $2}'; }
-chunks() { curl -s localhost:4300/metrics | awk -F'[{}" ]+' '/^indexer_backfill_chunks/ {printf "%s=%s ", $3, $5}'; }
+chunks() { curl -s localhost:4300/metrics | awk -F'[{}" ]+' '/^indexer_backfill_chunks/ {printf "%s=%s ", $3, $4}'; }
 
 echo "▶ 1/4 stopping the indexer (simulated outage)"
 ./scripts/stack.sh stop indexer
@@ -25,7 +25,7 @@ echo "   sending one NEW deposit during catch-up…"
 npx tsx scripts/send-deposit.ts --client A --amount 123 &
 for i in $(seq 1 180); do
   lag=$(metric indexer_head_lag_blocks); printf "\r   lag %6s blocks · backfill %s   " "${lag:-?}" "$(chunks)"
-  pending=$(curl -s localhost:4300/metrics | awk -F'[{}" ]+' '/^indexer_backfill_chunks/ && ($3=="pending"||$3=="running") {s+=$5} END {print s+0}')
+  pending=$(curl -s localhost:4300/metrics | awk -F'[{}" ]+' '/^indexer_backfill_chunks/ && ($3=="pending"||$3=="running") {s+=$4} END {print s+0}')
   [ -n "$lag" ] && [ "${lag%.*}" -lt 30 ] && [ "$pending" = "0" ] && break
   sleep 2
 done

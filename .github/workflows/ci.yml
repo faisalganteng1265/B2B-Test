@@ -44,7 +44,7 @@ jobs:
       - name: typecheck
         run: pnpm -r typecheck
       - name: unit + integration (indexer on simulated chain, workflow on real restate-server)
-        run: pnpm -r test
+        run: pnpm test
       - name: reorg + catch-up demos (simulated chain)
         run: |
           npx tsx scripts/reorg-demo.ts

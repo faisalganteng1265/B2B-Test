@@ -36,7 +36,7 @@ test-contracts:
 	cd contracts && forge test
 
 test: test-contracts   ## contracts + all unit/integration tests (needs local Postgres)
-	pnpm -r test
+	pnpm test
 
 lint:
 	pnpm lint && pnpm typecheck

@@ -342,15 +342,13 @@ export function createOfframpWorkflow(deps: OfframpDeps) {
                   .update(offrampRuns)
                   .set({ step: 'completed', lastError: null, updatedAt: new Date() })
                   .where(eq(offrampRuns.depositId, depositId));
-                await tx
-                  .insert(auditLog)
-                  .values({
-                    actor: 'workflow',
-                    action: 'payout_success',
-                    entity: 'deposit',
-                    entityId: depositId,
-                    data: { payoutId, idr: money.net },
-                  });
+                await tx.insert(auditLog).values({
+                  actor: 'workflow',
+                  action: 'payout_success',
+                  entity: 'deposit',
+                  entityId: depositId,
+                  data: { payoutId, idr: money.net },
+                });
               });
               return { status: 'completed', payoutId, idrAmount: money.net };
             }
@@ -392,8 +390,17 @@ async function loadDeposit(
   if (restateKey !== d.workflowId && !restateKey.startsWith(`${d.workflowId}#retry-`)) {
     throw terminal('WORKFLOW_KEY_MISMATCH', `${restateKey} is not a workflow for deposit ${d.workflowId}`);
   }
-  if (d.status !== 'dispatched')
-    throw terminal('INVALID_STATUS', `deposit status is ${d.status}, expected dispatched`);
+  // The outbox dispatcher submits to Restate BEFORE it marks the deposit `dispatched` (so a crash in
+  // between can never lose it). Restate may start us before that write lands: a `confirmed`
+  // deposit is therefore valid here, and we take it over ourselves (idempotent, final already).
+  if (d.status === 'confirmed') {
+    await db
+      .update(deposits)
+      .set({ status: 'dispatched', dispatchedAt: new Date() })
+      .where(and(eq(deposits.id, depositId), eq(deposits.status, 'confirmed')));
+  } else if (d.status !== 'dispatched') {
+    throw terminal('INVALID_STATUS', `deposit status is ${d.status}, expected confirmed|dispatched`);
+  }
   const c = await db.query.clients.findFirst({ where: eq(clients.id, d.clientId) });
   if (!c) throw terminal('CLIENT_NOT_FOUND', d.clientId);
   if (c.status !== 'active') throw terminal('CLIENT_SUSPENDED', c.id);
@@ -435,15 +442,13 @@ async function markManualReview(db: Db, depositId: string, reason: string) {
       .update(offrampRuns)
       .set({ step: 'manual_review', lastError: reason.slice(0, 500), updatedAt: new Date() })
       .where(eq(offrampRuns.depositId, depositId));
-    await tx
-      .insert(auditLog)
-      .values({
-        actor: 'workflow',
-        action: 'manual_review',
-        entity: 'deposit',
-        entityId: depositId,
-        data: { reason },
-      });
+    await tx.insert(auditLog).values({
+      actor: 'workflow',
+      action: 'manual_review',
+      entity: 'deposit',
+      entityId: depositId,
+      data: { reason },
+    });
   });
 }
 

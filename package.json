@@ -11,7 +11,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "test": "pnpm -r --if-present test",
+    "test": "pnpm -r --workspace-concurrency=1 --if-present test",
     "test:contracts": "cd contracts && forge test",
     "db:generate": "pnpm --filter @mopay/db generate",
     "db:migrate": "pnpm --filter @mopay/db migrate",

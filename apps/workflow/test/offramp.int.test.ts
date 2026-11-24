@@ -136,6 +136,35 @@ describe('offramp workflow', () => {
     expect(Number(retries[0]!.n)).toBeGreaterThan(30);
   });
 
+  it('REGRESSION: a workflow that starts before the outbox marks the deposit dispatched still completes', async () => {
+    const d = await H.createDeposit(0, 5_000_000n);
+    // simulate the race: Restate runs the workflow while the deposit is still `confirmed`
+    await H.h.db.execute(sql`ALTER TABLE deposits DISABLE TRIGGER deposits_transition_guard_trg`);
+    await H.h.db.update(deposits).set({ status: 'confirmed' }).where(eq(deposits.id, d.id));
+    await H.h.db.execute(sql`ALTER TABLE deposits ENABLE TRIGGER deposits_transition_guard_trg`);
+    await H.submit(d.workflowId, d.id);
+    const final = await done(d.id);
+    expect(final.status).toBe('completed');
+  });
+
+  it('refuses to process a deposit that is not final (seen) or was reorged (orphaned)', async () => {
+    for (const status of ['seen', 'orphaned'] as const) {
+      const d = await H.createDeposit(0, 5_000_000n);
+      await H.h.db.execute(sql`ALTER TABLE deposits DISABLE TRIGGER deposits_transition_guard_trg`);
+      await H.h.db.update(deposits).set({ status }).where(eq(deposits.id, d.id));
+      await H.h.db.execute(sql`ALTER TABLE deposits ENABLE TRIGGER deposits_transition_guard_trg`);
+      await H.submit(d.workflowId, d.id);
+      await waitFor(async () => {
+        const r = await H.h.db.query.offrampStepEvents.findFirst({
+          where: and(eq(offrampStepEvents.depositId, d.id), eq(offrampStepEvents.kind, 'failed')),
+        });
+        return r;
+      });
+      expect((await statusOf(d.id)).status).toBe(status); // untouched
+      expect(await H.h.db.query.payouts.findFirst({ where: eq(payouts.depositId, d.id) })).toBeUndefined();
+    }
+  });
+
   it('killing the workflow service in the middle of confirm-swap resumes from the journal without a second swap', async () => {
     const ordersBefore = H.mobeeStore.orderCount();
     H.confirmDelayMs = 1500;
