@@ -127,3 +127,38 @@ uses optimistic concurrency, so even two "leaders" cannot both advance the head.
 Only `orphaned → seen` is allowed (migration 0002). A reorged deposit that reappears on the new
 branch must become final again before it can be dispatched, and it keeps its deterministic
 workflow id `{chainId}:{txHash}:{logIndex}`, so it can never run twice.
+
+## ADR-013 — Why Restate for orchestration
+Every step of the offramp touches money in an external system (exchange swap, bank transfer). We
+need (a) a durable record of which side effects already happened, (b) automatic retries without
+re-executing completed effects, and (c) waiting on external events (bank callbacks) for minutes or
+hours without holding a process. Restate's journal gives exactly this. `ctx.run` results are
+persisted and replayed instead of re-executed after a crash, `ctx.sleep` and awakeables suspend
+the invocation without a live process, and the workflow key gives at-most-once execution per
+deposit. The service itself is stateless, so we scale or restart replicas freely. Alternatives
+(a hand-rolled outbox + state machine, Temporal) need either much more code or a heavier
+cluster with deterministic-replay restrictions on the code.
+
+## ADR-014 — Workflow idempotency rules
+- Restate key = `{chainId}:{txHash}:{logIndex}`; a duplicate submit returns `PreviouslyAccepted` (tested).
+- External idempotency keys derive from `deposits.workflow_id` (canonical), not the Restate key, so
+  an admin re-drive (`<id>#retry-N`) reuses the same swap/payout keys and cannot double-pay.
+- Swap: `wf:swap` on the first quote and `wf:swap:N` on re-quotes. Mobee records `QUOTE_EXPIRED` against
+  a key, so a re-quote needs a new key. This is safe because we re-quote only after a definitive
+  "not executed" answer, and Mobee executes a quote at most once.
+- Payout: the `payouts` row (UNIQUE deposit_id + idempotency_key) and the awakeable id are stored
+  BEFORE `POST /transfers`, so a fast callback can always find what to wake.
+- Waiting for the bank: the awakeable plus `orTimeout(PAYOUT_CALLBACK_TIMEOUT_MS)`. On timeout we reconcile
+  with `GET /v1/transfers/:id` and keep waiting on the same awakeable (tested with dropped callbacks).
+- Ledger journals use ids `<depositId>:{received,swap,payout}`, so re-running a step is a no-op.
+- Error classes: retryable (5xx/timeout/network/429/PRICE_UNAVAILABLE) → rethrown, and Restate
+  retries with exponential backoff (300 ms → 10 s) and **no attempt limit**, with an ALERT log + audit
+  row after `STEP_ALERT_AFTER_ATTEMPTS`. Terminal (validation, QUOTE_EXPIRED×5, name mismatch,
+  bank reject, insufficient balance) → `TerminalError` → `manual_review` with a reason.
+- A final bank reject is never retried to the same account; the IDR stays in `client_idr_payable`.
+
+**Verified by tests (real restate-server):** with FAIL_RATE 0.3, FAIL_AFTER 0.1 and timeouts on both
+mocks, plus 30% duplicate / 10% dropped callbacks and 20 duplicate dispatches, 100/100 deposits
+complete; there are exactly 100 swaps and 100 transfers, `count(payouts) = count(completed)`, and the ledger is
+balanced. Killing the workflow service during `confirm-swap` resumes without re-locking the quote
+and without a second swap.

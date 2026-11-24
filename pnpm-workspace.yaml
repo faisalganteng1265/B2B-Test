@@ -3,4 +3,5 @@ packages:
   - apps/*
   - scripts
 allowBuilds:
+  '@scarf/scarf': false
   esbuild: true

@@ -33,3 +33,12 @@ bifast:          ## run bifast-mock (port 4200)
 
 indexer:         ## run the indexer (port 4300: /healthz /readyz /metrics /status)
 	pnpm --filter @mopay/indexer start
+
+restate:         ## run restate-server natively (ingress 8080, admin 9070)
+	mkdir -p data/restate && RESTATE_LOG_FILTER=warn node_modules/.bin/restate-server --listen-mode tcp --base-dir data/restate --node-name mopay
+
+workflow:        ## run the offramp workflow endpoint (port 9080)
+	pnpm --filter @mopay/workflow start
+
+register:        ## register the workflow deployment with Restate
+	pnpm --filter @mopay/workflow register
