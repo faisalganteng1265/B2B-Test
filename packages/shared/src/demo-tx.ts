@@ -21,7 +21,11 @@ export async function sendTokenTransfers(opts: {
   const chain = opts.chainId === 84532 ? baseSepolia : base;
   const account = privateKeyToAccount(opts.privateKey as Hex);
   const pub = createChainClient(opts.chainId, opts.rpcUrls);
-  const wallet = createWalletClient({ account, chain, transport: fallback(opts.rpcUrls.map((u) => http(u))) });
+  const wallet = createWalletClient({
+    account,
+    chain,
+    transport: fallback(opts.rpcUrls.map((u) => http(u))),
+  });
   let nonce = await pub.getTransactionCount({ address: account.address, blockTag: 'pending' });
   const hashes: Hex[] = [];
   for (const amount of opts.amounts) {

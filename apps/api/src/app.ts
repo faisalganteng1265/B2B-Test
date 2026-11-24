@@ -195,15 +195,13 @@ export function createApp(d: ApiDeps) {
         .insert(depositAddresses)
         .values({ clientId: client.id, chainId, address: a.address.toLowerCase(), source: 'mobee' })
         .onConflictDoNothing();
-      await d.db
-        .insert(auditLog)
-        .values({
-          actor: `client:${client.id}`,
-          action: 'deposit_address_created',
-          entity: 'client',
-          entityId: client.id,
-          data: { address: a.address },
-        });
+      await d.db.insert(auditLog).values({
+        actor: `client:${client.id}`,
+        action: 'deposit_address_created',
+        entity: 'client',
+        entityId: client.id,
+        data: { address: a.address },
+      });
       return c.json(
         { chainId, address: a.address.toLowerCase(), source: 'mobee', createdAt: new Date().toISOString() },
         200,
@@ -468,15 +466,13 @@ function adminRoutes(d: ApiDeps) {
         .update(deposits)
         .set({ status: 'dispatched', statusReason: `admin retry (${key})` })
         .where(eq(deposits.id, id));
-      await tx
-        .insert(auditLog)
-        .values({
-          actor: 'admin',
-          action: 'admin_retry',
-          entity: 'deposit',
-          entityId: id,
-          data: { key, previousReason: dep.statusReason },
-        });
+      await tx.insert(auditLog).values({
+        actor: 'admin',
+        action: 'admin_retry',
+        entity: 'deposit',
+        entityId: id,
+        data: { key, previousReason: dep.statusReason },
+      });
     });
     const status = await d.submitWorkflow(key, id);
     return c.json({ ok: true, workflowKey: key, restate: status });
@@ -510,15 +506,13 @@ function adminRoutes(d: ApiDeps) {
       headers: { 'content-type': 'application/json', 'x-admin-token': d.env.ADMIN_TOKEN },
       signal: AbortSignal.timeout(5000),
     });
-    await d.db
-      .insert(auditLog)
-      .values({
-        actor: 'admin',
-        action: 'chaos_update',
-        entity: 'mock',
-        entityId: c.req.param('target'),
-        data: JSON.parse(body || '{}'),
-      });
+    await d.db.insert(auditLog).values({
+      actor: 'admin',
+      action: 'chaos_update',
+      entity: 'mock',
+      entityId: c.req.param('target'),
+      data: JSON.parse(body || '{}'),
+    });
     return c.json(await r.json(), r.status as 200);
   });
 
@@ -578,15 +572,13 @@ function adminRoutes(d: ApiDeps) {
         to: addr.address,
         txs: r.hashes.map((h) => ({ hash: h, explorerUrl: d.explorerTxUrl(h) })),
       });
-      await d.db
-        .insert(auditLog)
-        .values({
-          actor: 'admin',
-          action: 'demo_deposit_sent',
-          entity: 'client',
-          entityId: t.id,
-          data: { count: n, amount: b.data.amount, hashes: r.hashes },
-        });
+      await d.db.insert(auditLog).values({
+        actor: 'admin',
+        action: 'demo_deposit_sent',
+        entity: 'client',
+        entityId: t.id,
+        data: { count: n, amount: b.data.amount, hashes: r.hashes },
+      });
     }
     return c.json({ ok: true, results });
   });

@@ -286,15 +286,13 @@ export class IndexerStore {
           .where(and(inOrphan, inArray(deposits.status, ['confirmed', 'dispatched'])))
           .returning({ id: deposits.id, status: deposits.status });
         for (const i of incidents) {
-          await tx
-            .insert(auditLog)
-            .values({
-              actor: 'indexer',
-              action: 'reorg_incident',
-              entity: 'deposit',
-              entityId: i.id,
-              data: { ancestor: ancestor.number },
-            });
+          await tx.insert(auditLog).values({
+            actor: 'indexer',
+            action: 'reorg_incident',
+            entity: 'deposit',
+            entityId: i.id,
+            data: { ancestor: ancestor.number },
+          });
         }
       }
       const depth = previousHead - ancestor.number;

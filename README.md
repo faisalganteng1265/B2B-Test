@@ -87,6 +87,17 @@ make test            # forge test + every package's vitest suite (needs local Po
 | `apps/workflow` (real restate-server) | **100 deposits under FAIL_RATE 0.3** (+ lost responses, timeouts, duplicate/dropped callbacks, duplicate dispatch) → all complete exactly once; kill mid-swap; quote expiry; bank reject; name mismatch; webhook security |
 | `apps/api`                            | auth, rate limit, tenant isolation, quote math, webhook, admin re-drive, SSE                                                                                                                                              |
 
+## Verified results (Nov 2026, this machine, real Base Sepolia)
+
+| Scenario                                                                                                   | Result                                                                                                                                                  |
+| ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Detection latency (live path)                                                                              | deposit `seen` **0.8 s** after its receipt; `confirmed` at the `safe` boundary ~105–155 s later                                                         |
+| `make e2e` — 100 real deposits, FAIL_RATE 0.3 on both mocks + lost responses + duplicate/dropped callbacks | **100/100 completed** in 344 s; invariants green                                                                                                        |
+| `make demo-catchup` — indexer down 5 min while 50 real deposits land                                       | live jumped to the boundary, 6 backfill chunks done, lag 362 → 23 blocks, the deposit sent during catch-up was picked up live; 50/50 found via backfill |
+| Bug found by that demo                                                                                     | outbox/workflow race (1/50) → fixed + regression tests (ADR-016); the affected deposit was recovered with the admin re-drive; no double swap/payout     |
+| `make invariants` after all of the above                                                                   | 11/11 hold over 159 completed deposits: 159 swaps, 159 transfers, 159 payouts, ledger balanced                                                          |
+| Test suites                                                                                                | 5 forge + 82 vitest, all green                                                                                                                          |
+
 ## Environment notes
 
 - **Chain**: Base only (no Anvil), as requested. Reorg/mining-dependent tests run on `SimChain`, an

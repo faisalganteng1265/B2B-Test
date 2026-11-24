@@ -103,7 +103,12 @@ services:
     env_file: .env
     working_dir: /repo
     volumes: ['./:/repo']
-    entrypoint: ['sh', '-c', 'cd contracts && forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts@v5.4.0 --no-git 2>/dev/null; FORCE=1 ../scripts/deploy.sh']
+    entrypoint:
+      [
+        'sh',
+        '-c',
+        'cd contracts && forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts@v5.4.0 --no-git 2>/dev/null; FORCE=1 ../scripts/deploy.sh',
+      ]
 
 volumes:
   pgdata:

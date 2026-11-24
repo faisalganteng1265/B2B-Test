@@ -133,16 +133,14 @@ describe('client auth', () => {
 
   it('blocks suspended clients', async () => {
     const k = generateApiKey();
-    await h.db
-      .insert(clients)
-      .values({
-        name: 'Suspended',
-        apiKeyHash: k.hash,
-        apiKeySalt: k.salt,
-        apiKeyPrefix: k.prefix,
-        exchangeSubaccount: 'sub-x',
-        status: 'suspended',
-      });
+    await h.db.insert(clients).values({
+      name: 'Suspended',
+      apiKeyHash: k.hash,
+      apiKeySalt: k.salt,
+      apiKeyPrefix: k.prefix,
+      exchangeSubaccount: 'sub-x',
+      status: 'suspended',
+    });
     expect((await app.request('/v1/deposits', { headers: auth(k.key) })).status).toBe(403);
   });
 });
@@ -213,16 +211,14 @@ describe('BI-FAST webhook', () => {
       .select()
       .from(clientBankAccounts)
       .where(eq(clientBankAccounts.clientId, clientA));
-    await h.db
-      .insert(payouts)
-      .values({
-        depositId: d.id,
-        idempotencyKey: `${d.workflowId}:payout`,
-        bankAccountId: bank!.id,
-        amountIdr: 100n,
-        awakeableId: 'awk_1',
-        bifastRef: 'bf_1',
-      });
+    await h.db.insert(payouts).values({
+      depositId: d.id,
+      idempotencyKey: `${d.workflowId}:payout`,
+      bankAccountId: bank!.id,
+      amountIdr: 100n,
+      awakeableId: 'awk_1',
+      bifastRef: 'bf_1',
+    });
     const body = JSON.stringify({
       transferId: 'bf_1',
       idempotencyKey: `${d.workflowId}:payout`,
