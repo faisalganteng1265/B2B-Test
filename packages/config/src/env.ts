@@ -23,9 +23,12 @@ function ensureDotenv() {
   loadDotenv({ path: join(repoRoot(), '.env'), quiet: true });
 }
 
-const csv = z
-  .string()
-  .transform((s) => s.split(',').map((x) => x.trim()).filter(Boolean));
+const csv = z.string().transform((s) =>
+  s
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean),
+);
 
 /** Reusable env field schemas. Each service composes the ones it needs. */
 export const envFields = {
@@ -40,12 +43,16 @@ export const envFields = {
   MOBEE_API_KEY: z.string().min(1).default('mopay-dev'),
   MOBEE_API_SECRET: z.string().min(8).default('dev-mobee-secret-change-me'),
   BIFAST_URL: z.url().default('http://localhost:4200'),
+  BIFAST_API_KEY: z.string().min(1).default('pjp-dev-key'),
   BIFAST_WEBHOOK_SECRET: z.string().min(8).default('dev-bifast-secret-change-me'),
   API_URL: z.url().default('http://localhost:4000'),
   ADMIN_TOKEN: z.string().min(8).default('dev-admin-token'),
 };
 
-export function loadEnv<T extends z.ZodRawShape>(shape: T, source: NodeJS.ProcessEnv = process.env): z.infer<z.ZodObject<T>> {
+export function loadEnv<T extends z.ZodRawShape>(
+  shape: T,
+  source: NodeJS.ProcessEnv = process.env,
+): z.infer<z.ZodObject<T>> {
   ensureDotenv();
   const parsed = z.object(shape).safeParse(source);
   if (!parsed.success) {

@@ -11,15 +11,57 @@ describe('mobee hmac', () => {
   it('verifies a valid signature', () => {
     const ts = '1700000000';
     const sig = signMobee(secret, 'POST', '/v1/quick-swap/lock', ts, '{"amount":"1"}');
-    expect(verifyMobee({ secret, method: 'POST', path: '/v1/quick-swap/lock', timestamp: ts, signature: sig, body: '{"amount":"1"}', nowS: 1700000010 })).toEqual({ ok: true });
+    expect(
+      verifyMobee({
+        secret,
+        method: 'POST',
+        path: '/v1/quick-swap/lock',
+        timestamp: ts,
+        signature: sig,
+        body: '{"amount":"1"}',
+        nowS: 1700000010,
+      }),
+    ).toEqual({ ok: true });
   });
   it('rejects tampered body, wrong secret and stale timestamp', () => {
     const ts = '1700000000';
     const sig = signMobee(secret, 'POST', '/p', ts, 'a');
-    expect(verifyMobee({ secret, method: 'POST', path: '/p', timestamp: ts, signature: sig, body: 'b', nowS: 1700000000 })).toEqual({ ok: false, code: 'INVALID_SIGNATURE' });
-    expect(verifyMobee({ secret: 'other', method: 'POST', path: '/p', timestamp: ts, signature: sig, body: 'a', nowS: 1700000000 }).ok).toBe(false);
-    expect(verifyMobee({ secret, method: 'POST', path: '/p', timestamp: ts, signature: sig, body: 'a', nowS: 1700000031 })).toEqual({ ok: false, code: 'TIMESTAMP_OUT_OF_TOLERANCE' });
-    expect(verifyMobee({ secret, method: 'POST', path: '/p', timestamp: undefined, signature: sig, nowS: 1 })).toEqual({ ok: false, code: 'MISSING_HEADERS' });
+    expect(
+      verifyMobee({
+        secret,
+        method: 'POST',
+        path: '/p',
+        timestamp: ts,
+        signature: sig,
+        body: 'b',
+        nowS: 1700000000,
+      }),
+    ).toEqual({ ok: false, code: 'INVALID_SIGNATURE' });
+    expect(
+      verifyMobee({
+        secret: 'other',
+        method: 'POST',
+        path: '/p',
+        timestamp: ts,
+        signature: sig,
+        body: 'a',
+        nowS: 1700000000,
+      }).ok,
+    ).toBe(false);
+    expect(
+      verifyMobee({
+        secret,
+        method: 'POST',
+        path: '/p',
+        timestamp: ts,
+        signature: sig,
+        body: 'a',
+        nowS: 1700000031,
+      }),
+    ).toEqual({ ok: false, code: 'TIMESTAMP_OUT_OF_TOLERANCE' });
+    expect(
+      verifyMobee({ secret, method: 'POST', path: '/p', timestamp: undefined, signature: sig, nowS: 1 }),
+    ).toEqual({ ok: false, code: 'MISSING_HEADERS' });
   });
   it('verifies hex webhook signature', () => {
     const body = '{"transferId":"t1"}';

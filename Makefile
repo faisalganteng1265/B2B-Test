@@ -24,3 +24,9 @@ seed:            ## seed 2 demo clients (keys -> data/seed-clients.json)
 db-create:       ## create local databases (native Postgres)
 	psql -h localhost -U postgres -tc "select 1 from pg_database where datname='mopay'" | grep -q 1 || psql -h localhost -U postgres -c 'create database mopay'
 	psql -h localhost -U postgres -tc "select 1 from pg_database where datname='mopay_test'" | grep -q 1 || psql -h localhost -U postgres -c 'create database mopay_test'
+
+mobee:           ## run mobee-mock (port 4100)
+	pnpm --filter @mopay/mobee-mock start
+
+bifast:          ## run bifast-mock (port 4200)
+	pnpm --filter @mopay/bifast-mock start

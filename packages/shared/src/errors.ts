@@ -22,7 +22,12 @@ export class UpstreamError extends Error {
 }
 
 /** Error codes that are retryable even when returned with a 4xx status. */
-const RETRYABLE_CODES = new Set(['PRICE_UNAVAILABLE', 'RATE_LIMITED', 'TIMESTAMP_OUT_OF_TOLERANCE', 'NOT_READY']);
+const RETRYABLE_CODES = new Set([
+  'PRICE_UNAVAILABLE',
+  'RATE_LIMITED',
+  'TIMESTAMP_OUT_OF_TOLERANCE',
+  'NOT_READY',
+]);
 
 export function classifyHttp(status: number, code?: string): ErrorClass {
   if (code && RETRYABLE_CODES.has(code)) return 'retryable';
@@ -34,7 +39,8 @@ export function classifyError(err: unknown): ErrorClass {
   if (err instanceof UpstreamError) return err.cls;
   if (err instanceof Error) {
     // fetch network failures / aborts / timeouts are transient
-    if (err.name === 'AbortError' || err.name === 'TimeoutError' || err.name === 'TypeError') return 'retryable';
+    if (err.name === 'AbortError' || err.name === 'TimeoutError' || err.name === 'TypeError')
+      return 'retryable';
     const code = (err as { code?: string }).code;
     if (code && /^(ECONN|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|UND_ERR)/.test(code)) return 'retryable';
   }

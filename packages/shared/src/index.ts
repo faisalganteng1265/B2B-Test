@@ -4,3 +4,8 @@ export * from './errors';
 export * from './logger';
 export * from './ids';
 export * from './apikey';
+export * from './chaos';
+export * from './pricefeed';
+export * from './clients';
+export * from './chain';
+export * from './fixtures';

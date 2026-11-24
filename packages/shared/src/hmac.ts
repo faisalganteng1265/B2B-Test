@@ -10,13 +10,22 @@ export function mobeeCanonical(method: string, path: string, timestamp: string, 
   return m === 'POST' || m === 'PUT' ? `${base}\n${body ?? ''}` : base;
 }
 
-export function signMobee(secret: string, method: string, path: string, timestamp: string, body?: string): string {
-  return createHmac('sha256', secret).update(mobeeCanonical(method, path, timestamp, body)).digest('base64');
+export function signMobee(
+  secret: string,
+  method: string,
+  path: string,
+  timestamp: string,
+  body?: string,
+): string {
+  return createHmac('sha256', secret)
+    .update(mobeeCanonical(method, path, timestamp, body))
+    .digest('base64');
 }
 
 export const MOBEE_TIMESTAMP_TOLERANCE_S = 30;
 
-export type MobeeVerifyResult = { ok: true } | { ok: false; code: 'INVALID_SIGNATURE' | 'TIMESTAMP_OUT_OF_TOLERANCE' | 'MISSING_HEADERS' };
+export type MobeeVerifyResult =
+  { ok: true } | { ok: false; code: 'INVALID_SIGNATURE' | 'TIMESTAMP_OUT_OF_TOLERANCE' | 'MISSING_HEADERS' };
 
 export function verifyMobee(args: {
   secret: string;

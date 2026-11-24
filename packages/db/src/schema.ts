@@ -268,8 +268,12 @@ export const ledgerEntries = pgTable(
     journalId: text('journal_id').notNull(),
     account: ledgerAccount('account').notNull(),
     currency: text('currency').notNull(),
-    debit: tokenAmount('debit').notNull().default(sql`0`),
-    credit: tokenAmount('credit').notNull().default(sql`0`),
+    debit: tokenAmount('debit')
+      .notNull()
+      .default(sql`0`),
+    credit: tokenAmount('credit')
+      .notNull()
+      .default(sql`0`),
     depositId: uuid('deposit_id').references(() => deposits.id),
     memo: text('memo'),
     createdAt: now('created_at'),

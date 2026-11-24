@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { feeIdr, formatDecimal, parseDecimal, parseToken, swapBreakdown, tokenToIdr, vwapSell, parseRate } from '../src/money';
+import {
+  feeIdr,
+  formatDecimal,
+  parseDecimal,
+  parseToken,
+  swapBreakdown,
+  tokenToIdr,
+  vwapSell,
+  parseRate,
+} from '../src/money';
 
 describe('money', () => {
   it('parses and formats decimals without floats', () => {

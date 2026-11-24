@@ -64,7 +64,11 @@ export interface SwapBreakdown {
   netIdr: bigint;
 }
 
-export function swapBreakdown(amount: bigint, rateScaled: bigint, feeBps: bigint = DEFAULT_FEE_BPS): SwapBreakdown {
+export function swapBreakdown(
+  amount: bigint,
+  rateScaled: bigint,
+  feeBps: bigint = DEFAULT_FEE_BPS,
+): SwapBreakdown {
   const grossIdr = tokenToIdr(amount, rateScaled);
   const fee = feeIdr(grossIdr, feeBps);
   return { grossIdr, feeIdr: fee, netIdr: grossIdr - fee };
@@ -111,7 +115,14 @@ export function vwapSell(bids: BookLevel[], amount: bigint): VwapResult {
   if (remaining > 0n) throw new Error('INSUFFICIENT_LIQUIDITY');
   const vwap = notional / amount;
   const slippageBps = ceilDiv((first.priceScaled - vwap) * BPS, first.priceScaled);
-  return { vwapScaled: vwap, bestScaled: first.priceScaled, worstScaled: worst, filled: amount, levelsUsed: levels, slippageBps };
+  return {
+    vwapScaled: vwap,
+    bestScaled: first.priceScaled,
+    worstScaled: worst,
+    filled: amount,
+    levelsUsed: levels,
+    slippageBps,
+  };
 }
 
 /** JSON-safe bigint serialization helper. */

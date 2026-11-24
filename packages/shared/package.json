@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@mopay/config": "workspace:*",
+    "hono": "^4.13.21",
     "pino": "^10.4.0",
     "viem": "^2.58.4",
     "zod": "^4.6.7"

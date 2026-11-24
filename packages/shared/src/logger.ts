@@ -12,6 +12,10 @@ export function createLogger(service: string, level = process.env.LOG_LEVEL ?? '
 }
 
 /** Child logger carrying the correlation id (= deposit id / workflow id). */
-export function withCorrelation(log: Logger, correlationId: string, extra: Record<string, unknown> = {}): Logger {
+export function withCorrelation(
+  log: Logger,
+  correlationId: string,
+  extra: Record<string, unknown> = {},
+): Logger {
   return log.child({ correlationId, ...extra });
 }
