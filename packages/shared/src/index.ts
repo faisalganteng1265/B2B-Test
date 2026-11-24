@@ -9,3 +9,4 @@ export * from './pricefeed';
 export * from './clients';
 export * from './chain';
 export * from './fixtures';
+export * from './demo-tx';

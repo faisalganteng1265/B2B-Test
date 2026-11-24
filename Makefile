@@ -42,3 +42,6 @@ workflow:        ## run the offramp workflow endpoint (port 9080)
 
 register:        ## register the workflow deployment with Restate
 	pnpm --filter @mopay/workflow register
+
+api:             ## run the Mopay API (port 4000, docs at /docs)
+	pnpm --filter @mopay/api start

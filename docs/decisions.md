@@ -162,3 +162,17 @@ mocks, plus 30% duplicate / 10% dropped callbacks and 20 duplicate dispatches, 1
 complete; there are exactly 100 swaps and 100 transfers, `count(payouts) = count(completed)`, and the ledger is
 balanced. Killing the workflow service during `confirm-swap` resumes without re-locking the quote
 and without a second swap.
+
+## ADR-015 — API surface and security
+- Client keys are `mpk_<8-hex prefix>_<secret>`, stored as sha256(salt‖key) and looked up by prefix,
+  then compared in constant time. The plaintext key is shown once at seed time (`data/seed-clients.json`, gitignored).
+- A token-bucket rate limit runs per key, in-process. In production this moves to the gateway or Redis, since a per-replica
+  limit multiplies with the replica count.
+- Clients only ever see their own deposits (404, not 403, for other clients' ids), and internal
+  details (ledger, audit) are not exposed on `/v1`.
+- The webhook verifies HMAC over the **raw body**, dedups on `transferId:status`, and never mutates
+  payouts itself. It only wakes the workflow, which owns all state transitions. Invalid
+  signatures are recorded (`signature_valid=false`) for forensics.
+- `/v1/stream` (SSE) and `/admin/*` require `ADMIN_TOKEN`. The dashboard reaches them only through
+  Next.js server-side route handlers, so the token never reaches the browser.
+- Admin re-drive refuses deposits flagged as reorg incidents; these need human resolution.
