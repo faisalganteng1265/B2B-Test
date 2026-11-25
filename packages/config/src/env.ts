@@ -44,6 +44,16 @@ export const envFields = {
   MOBEE_URL: z.url().default('http://localhost:4100'),
   MOBEE_API_KEY: z.string().min(1).default('mopay-dev'),
   MOBEE_API_SECRET: z.string().min(8).default('dev-mobee-secret-change-me'),
+  INDODAX_URL: z.url().default('http://localhost:4100'),
+  INDODAX_API_KEY: z.string().min(1).default('MOPAY-DEV-INDODAX-KEY'),
+  INDODAX_API_SECRET: z.string().min(16).default('dev-indodax-secret-change-me-0000'),
+  /** Mopay's own (KYC same-name) bank account: where IDR is swept from the exchange. */
+  MOPAY_BANK_CODE: z
+    .string()
+    .regex(/^\d{3}$/)
+    .default('014'),
+  MOPAY_BANK_ACCOUNT: z.string().default('5270011223'),
+  MOPAY_BANK_NAME: z.string().default('PT MOPAY TEKNOLOGI INDONESIA'),
   BIFAST_URL: z.url().default('http://localhost:4200'),
   BIFAST_API_KEY: z.string().min(1).default('pjp-dev-key'),
   BIFAST_WEBHOOK_SECRET: z.string().min(8).default('dev-bifast-secret-change-me'),

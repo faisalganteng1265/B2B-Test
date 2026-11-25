@@ -61,6 +61,10 @@ export const ledgerAccount = pgEnum('ledger_account', [
   'client_idr_payable',
   'bank_out',
   'fee_revenue',
+  /** IDR in Mopay's own bank account (swept from the exchange; funds payouts) */
+  'mopay_bank_idr',
+  /** fees the exchange charges Mopay for IDR withdrawals */
+  'withdraw_fee_expense',
 ]);
 
 export const clients = pgTable('clients', {
@@ -71,7 +75,7 @@ export const clients = pgTable('clients', {
   apiKeySalt: text('api_key_salt').notNull(),
   apiKeyPrefix: text('api_key_prefix').notNull(),
   status: clientStatus('status').notNull().default('active'),
-  /** Mobee sub-account id holding this client's crypto. */
+  /** Exchange sub-account (Mobee model) or a reference label (Indodax: single Mopay account). */
   exchangeSubaccount: text('exchange_subaccount').notNull(),
   createdAt: now('created_at'),
 });
@@ -92,17 +96,50 @@ export const depositAddresses = pgTable(
   'deposit_addresses',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    clientId: uuid('client_id')
-      .notNull()
-      .references(() => clients.id),
+    /** NULL for a shared exchange address (Indodax: one deposit address per account). */
+    clientId: uuid('client_id').references(() => clients.id),
     chainId: integer('chain_id').notNull(),
     /** Lowercased 0x address. */
     address: text('address').notNull(),
     source: text('source').notNull().default('mobee'),
+    /** client = dedicated per-client address; shared = attribute by the sender wallet. */
+    kind: text('kind').notNull().default('client'),
     createdAt: now('created_at'),
   },
   (t) => [uniqueIndex('deposit_addresses_chain_address_uq').on(t.chainId, t.address)],
 );
+
+/**
+ * Wallets a B2B client registered (KYB) as the senders of its deposits. Needed when the exchange
+ * gives one shared deposit address (Indodax): the sender is how a deposit is attributed.
+ */
+export const clientWallets = pgTable(
+  'client_wallets',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    clientId: uuid('client_id')
+      .notNull()
+      .references(() => clients.id),
+    chainId: integer('chain_id').notNull(),
+    address: text('address').notNull(),
+    label: text('label'),
+    verifiedAt: ts('verified_at'),
+    createdAt: now('created_at'),
+  },
+  (t) => [uniqueIndex('client_wallets_chain_address_uq').on(t.chainId, t.address)],
+);
+
+/** Treasury sweeps: IDR withdrawn from the exchange to Mopay's own bank account. */
+export const treasurySweeps = pgTable('treasury_sweeps', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  clientRequestId: text('client_request_id').notNull().unique(),
+  amountIdr: idr('amount_idr').notNull(),
+  feeIdr: idr('fee_idr'),
+  exchangeOrderNo: text('exchange_order_no'),
+  status: text('status').notNull().default('requested'),
+  createdAt: now('created_at'),
+  updatedAt: now('updated_at'),
+});
 
 export const chainBlocks = pgTable(
   'chain_blocks',
@@ -173,9 +210,8 @@ export const deposits = pgTable(
     fromAddress: text('from_address').notNull(),
     toAddress: text('to_address').notNull(),
     amountBaseUnits: tokenAmount('amount_base_units').notNull(),
-    clientId: uuid('client_id')
-      .notNull()
-      .references(() => clients.id),
+    /** NULL = sender wallet not registered to any client (never processed until assigned). */
+    clientId: uuid('client_id').references(() => clients.id),
     status: depositStatus('status').notNull().default('seen'),
     /** Which indexer path found it first: live | backfill. */
     source: text('source').notNull(),
@@ -214,6 +250,8 @@ export const offrampRuns = pgTable('offramp_runs', {
   feeIdr: idr('fee_idr'),
   idrAmount: idr('idr_amount'),
   exchangeOrderId: text('exchange_order_id'),
+  /** commission the exchange charged on the sell (fee + tax), IDR */
+  exchangeFeeIdr: idr('exchange_fee_idr'),
   payoutId: uuid('payout_id'),
   quoteAttempts: integer('quote_attempts').notNull().default(0),
   lastError: text('last_error'),

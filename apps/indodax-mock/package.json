@@ -1,0 +1,23 @@
+{
+  "name": "@mopay/indodax-mock",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.11",
+    "@mopay/config": "workspace:*",
+    "@mopay/shared": "workspace:*",
+    "hono": "^4.13.21",
+    "viem": "^2.58.4",
+    "zod": "^4.6.7"
+  }
+}
