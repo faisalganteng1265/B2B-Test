@@ -18,7 +18,7 @@ import { handleBifastCallback, type PayoutSignal } from '@mopay/workflow';
 import { adminAuth, clientAuth, type AuthEnv } from './auth';
 import type { ApiEnv } from './env';
 import type { Notifier } from './notifier';
-import { indicativeQuote, priceView, sharedDepositAddress, Treasury } from './exchange';
+import { indicativeQuote, priceView, sharedDepositAddress, Treasury, withRetry } from './exchange';
 import {
   alerts,
   depositCounts,
@@ -717,7 +717,7 @@ function adminRoutes(d: ApiDeps) {
     let account = null;
     let sweeps: unknown[] = [];
     try {
-      account = await d.indodax.account();
+      account = await withRetry(() => d.indodax.account());
       sweeps = await treasury.reconcile();
     } catch (e) {
       return c.json(json({ depositAddress: shared?.address ?? null, error: errMsg(e), sweeps }));
@@ -737,7 +737,7 @@ function adminRoutes(d: ApiDeps) {
       .object({ amount: z.string().regex(/^\d+$/).optional() })
       .safeParse(await c.req.json().catch(() => ({})));
     if (!b.success) return c.json({ error: { code: 'VALIDATION', message: b.error.message } }, 400);
-    const acct = await d.indodax.account();
+    const acct = await withRetry(() => d.indodax.account());
     const free = BigInt(acct.balances.find((x) => x.asset === 'IDR')?.free ?? '0');
     const amount = b.data.amount ? BigInt(b.data.amount) : free;
     if (amount > free)

@@ -1,6 +1,6 @@
 # Mopay B2B Offramp — prototype
 
-USDT on **Base Sepolia** → sold for IDR at a licensed exchange (PAKD) → rupiah to the client's bank
+USDT on **Base Sepolia** → sold for IDR on Indodax (PAKD, TAPIv2 mock) → rupiah to the client's bank
 account via **BI-FAST** (PJP). Mopay only orchestrates and never holds funds.
 
 |                  | In this prototype                                                                                                                                   |
@@ -107,9 +107,19 @@ make test            # forge test + every package's vitest suite (needs local Po
 - Base Sepolia runs at ~5 blocks/s; the `safe` tag trails by ~2 min, so a deposit is **seen in ~1 s** and
   **paid ~2 min later** (ADR-008).
 
+## B2B flow with Indodax
+
+1. The client registers its sender wallet(s) once (`POST /v1/wallets`, signed message).
+2. The client sends USDT to Mopay's single Indodax deposit address (`POST /v1/deposit-addresses`).
+3. The indexer attributes the deposit by sender and waits for finality; the workflow waits for Indodax to credit it.
+4. MARKET SELL on Indodax (deterministic `newClientOrderId`), fills from `myTrades`.
+5. The ledger records gross, Indodax commission, and Mopay's 0.35% fee; the net is paid to the client's bank via BI-FAST (PJP).
+6. Treasury sweeps the IDR from Indodax to Mopay's bank (Exchange page in the dashboard).
+
 ## Known limitations
 
-- Exchange and bank are mocks; only the price and the chain are real. Swaps settle against mock balances.
+- Exchange and bank are mocks; only the price, the order book used for fills, and the chain are real. Indodax has no public sandbox (ADR-018).
+- Sender-wallet attribution cannot attribute deposits sent from another exchange (shared hot wallets); those land in manual review.
 - Admin re-drive after a _final_ bank reject reuses the same payout key, so it ends in the same
   rejection. Paying to a corrected account needs a new payout flow (not built).
 - Rate limiting is in-process (per replica); webhooks have no mTLS; API keys use salted SHA-256

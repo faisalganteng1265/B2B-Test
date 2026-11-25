@@ -20,7 +20,7 @@ flowchart LR
     RS[("Restate server<br/>durable journal")]
   end
   subgraph ext["Upstreams (mocked)"]
-    MOB["mobee-mock (PAKD)<br/>HMAC · quick-swap"]
+    MOB["indodax-mock (PAKD)<br/>TAPIv2 · MARKET sell"]
     BIF["bifast-mock (PJP)<br/>async signed callbacks"]
   end
   IDXR[["Indodax public API<br/>ticker + depth (real)"]]
@@ -59,7 +59,7 @@ sequenceDiagram
   participant DB as Postgres
   participant R as Restate
   participant W as offramp workflow
-  participant M as Mobee (PAKD)
+  participant M as Indodax (PAKD)
   participant B as BI-FAST (PJP)
   participant A as API webhook
 
@@ -74,10 +74,11 @@ sequenceDiagram
   R->>W: run(depositId)
   W->>DB: load-deposit · record-received (journal "received")
   loop until credited (durable sleep)
-    W->>M: GET /v1/deposits/crypto?txHash
+    W->>M: GET /api/v2/capital/deposit/hisrec (txId + amount)
   end
-  W->>M: POST quick-swap/lock (VWAP of live Indodax bids)
-  W->>M: POST quick-swap/confirm  Idempotency-Key = wf:swap
+  W->>W: price check: VWAP of live Indodax bids + slippage floor
+  W->>M: POST /api/v2/order MARKET SELL  newClientOrderId = hash(wf)
+  W->>M: GET /api/v2/myTrades?clientOrderId (fills, commission)
   W->>DB: record-swap (journal "swap", fee 0.35% rounded up)
   W->>B: account-inquiry (name must match)
   W->>DB: payouts row (UNIQUE) + awakeable id

@@ -11,6 +11,21 @@ import {
   type Logger,
 } from '@mopay/shared';
 
+/** Retry transient exchange errors (5xx, timeouts, rate limits) a few times with backoff. */
+export async function withRetry<T>(fn: () => Promise<T>, attempts = 5): Promise<T> {
+  let last: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      last = e;
+      if (!(e as { retryable?: boolean }).retryable) throw e;
+      await new Promise((r) => setTimeout(r, 200 * 2 ** i));
+    }
+  }
+  throw last;
+}
+
 /** Mopay's exchange deposit address (Indodax: ONE per account; clients are told apart by sender). */
 export async function sharedDepositAddress(db: Db, chainId: number) {
   return db.query.depositAddresses.findFirst({
@@ -140,7 +155,7 @@ export class Treasury {
     const open = await this.db.select().from(treasurySweeps).where(isNull(treasurySweeps.exchangeOrderNo));
     for (const s of open)
       if (s.status === 'requested') await this.submit(s.id, s.clientRequestId, s.amountIdr).catch(() => {});
-    const orders = (await this.indodax.fiatOrders('1')).data;
+    const orders = (await withRetry(() => this.indodax.fiatOrders('1'))).data;
     const pending = await this.db.select().from(treasurySweeps).where(eq(treasurySweeps.status, 'submitted'));
     for (const s of pending) {
       const o = orders.find((x) => x.orderNo === s.exchangeOrderNo);

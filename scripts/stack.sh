@@ -44,6 +44,9 @@ wait_healthy() {
 start() {
   local s=$1
   if alive "$s"; then echo "  • $s already running (pid $(pidof_svc "$s"))"; return 0; fi
+  # Something we did not start already answers on this service's port: refuse instead of letting a
+  # foreign process pass our health check.
+  if healthy "$s"; then echo "  ✗ $s: its port is already in use by another process (stale or foreign); stop it first"; return 1; fi
   setsid bash -c "exec ${CMD[$s]}" >> "data/logs/$s.log" 2>&1 < /dev/null &
   echo $! > "data/pids/$s.pid"
   printf "  ▸ %-12s starting (pid %s)… " "$s" "$!"

@@ -209,3 +209,26 @@ keys; invariants stayed green.
 - Chain-dependent behaviour (reorgs, 5,000-block catch-up, crashes) on `SimChain` (ADR-001).
 - Suites share `mopay_test`, so the workspace runs them serially (`--workspace-concurrency=1`).
 - E2E on the live stack + real Base Sepolia: `make e2e` (100 real deposits under chaos → invariants).
+
+## ADR-018 — Exchange: INDODAX Trade API 2.0 (mock) instead of Mobee
+
+**Context.** The team's reference PoCs (`poc-pjt`) use Indodax. Indodax has no public sandbox
+(`demo-indodax.com` returns 403), so real calls would mean real money. We therefore built
+`apps/indodax-mock` against the **official docs** (`btcid/indodax-official-api-docs`,
+INDODAX-TradeAPI-2-Private.md, commit 8d1b409). The signing implementation is verified against the
+docs' own example signature (`packages/shared/test/indodax.test.ts`).
+
+**What Indodax changes, and how we handle it**
+
+| Indodax fact (from the docs)                                              | Consequence                                       | Design                                                                                                                                                                                                                                                                           |
+| ------------------------------------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ONE deposit address per account/coin/network, no sub-accounts             | The destination cannot identify the client        | Clients **register sender wallets** (`POST /v1/wallets`, EIP-191 ownership proof). Deposits are attributed by `from`. Unknown sender → `manual_review` (`UNATTRIBUTED`). A DB CHECK forbids confirming a deposit without a client. Operators can assign it to a client (audited) |
+| No quote lock; MARKET/LIMIT only                                          | No guaranteed rate                                | Pre-trade **price check** (VWAP of the live bid book for the size) + slippage floor (`MAX_SLIPPAGE_BPS`); a fill below the floor raises an alert (it cannot be undone). The client is paid the real proceeds                                                                     |
+| `newClientOrderId` ≤ 36 chars; reuse → `-2010 "duplicate"` (not a replay) | Retries after a lost response need reconciliation | Deterministic id `mp` + sha256(workflowId \| purpose)[0:32]. On `-2010 duplicate` the workflow proves the order exists with `GET /order?origClientOrderId`. `-2010` without "duplicate" (e.g. insufficient balance) is terminal                                                  |
+| Orders may not be visible right away (`-2013`)                            | GET-after-POST can fail                           | `-2013` is classified retryable; fills are polled from `myTrades?clientOrderId` with durable sleeps                                                                                                                                                                              |
+| Commission (fee + tax) per fill, in IDR                                   | Real cost of selling                              | Recorded as `exchange_fee_idr` and passed through: net = gross − commission − Mopay fee (both rounded up). Default 41 bps, measured by the team on real sells                                                                                                                    |
+| IDR withdrawals only to the KYC holder's own bank, > Rp100.000            | The exchange cannot pay clients directly          | **Treasury sweep** from Indodax to Mopay's bank (`clientRequestId` idempotent, journal `sweep:<id>`). Client payouts go via the PJP from Mopay's float                                                                                                                           |
+| `hisrec` has no log index                                                 | Matching a credit                                 | Match `txId` + exact amount                                                                                                                                                                                                                                                      |
+
+The Mobee mock remains in the repo (`apps/mobee-mock`, still tested) as the reference for a
+sub-account exchange model. The indexer supports both (`deposit_addresses.kind = client | shared`).
