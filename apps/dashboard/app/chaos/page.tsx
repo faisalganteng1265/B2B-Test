@@ -7,7 +7,7 @@ import { num, short } from '@/lib/format';
 import type { ChaosConfig, ChaosState } from '@/lib/types';
 import { Button, Card, CopyText, ErrorNote, PageHeader, Pill } from '@/components/ui';
 
-type Target = 'mobee' | 'bifast';
+type Target = 'exchange' | 'bifast';
 const KNOBS: {
   key: keyof ChaosConfig;
   label: string;
@@ -20,28 +20,28 @@ const KNOBS: {
     key: 'FAIL_RATE',
     label: 'Fail before processing',
     help: '500 without doing anything',
-    targets: ['mobee', 'bifast'],
+    targets: ['exchange', 'bifast'],
     kind: 'rate',
   },
   {
     key: 'FAIL_AFTER_RATE',
     label: 'Lose the response',
     help: 'Do the work, then reply 500 — tests idempotency',
-    targets: ['mobee', 'bifast'],
+    targets: ['exchange', 'bifast'],
     kind: 'rate',
   },
   {
     key: 'TIMEOUT_RATE',
     label: 'Timeout',
     help: 'Hold the response longer than the client waits',
-    targets: ['mobee', 'bifast'],
+    targets: ['exchange', 'bifast'],
     kind: 'rate',
   },
   {
     key: 'LATENCY_MS_MAX',
     label: 'Max latency',
     help: 'Random extra delay per request',
-    targets: ['mobee', 'bifast'],
+    targets: ['exchange', 'bifast'],
     kind: 'ms',
     max: 3000,
   },
@@ -161,8 +161,8 @@ function Knob({
 
 function MockPanel({ target, state }: { target: Target; state: ChaosState | { error: string } | undefined }) {
   const set = useSetChaos();
-  const title = target === 'mobee' ? 'Exchange (Mobee mock)' : 'BI-FAST (PJP mock)';
-  const Icon = target === 'mobee' ? Server : Landmark;
+  const title = target === 'exchange' ? 'Exchange (Indodax TAPIv2 mock)' : 'BI-FAST (PJP mock)';
+  const Icon = target === 'exchange' ? Server : Landmark;
   const ok = state && 'config' in state;
   return (
     <Card
@@ -246,9 +246,9 @@ export default function ChaosPage() {
   const [amount, setAmount] = useState('100');
   const applyPreset = (patch: Partial<ChaosConfig>) => {
     set.mutate({
-      target: 'mobee',
+      target: 'exchange',
       patch: Object.fromEntries(
-        Object.entries(patch).filter(([k]) => KNOBS.find((x) => x.key === k)?.targets.includes('mobee')),
+        Object.entries(patch).filter(([k]) => KNOBS.find((x) => x.key === k)?.targets.includes('exchange')),
       ) as Record<string, number>,
     });
     set.mutate({ target: 'bifast', patch: patch as Record<string, number> });
@@ -345,7 +345,7 @@ export default function ChaosPage() {
             </ul>
           )}
         </Card>
-        <MockPanel target="mobee" state={data?.mobee} />
+        <MockPanel target="exchange" state={data?.exchange} />
         <MockPanel target="bifast" state={data?.bifast} />
       </div>
 

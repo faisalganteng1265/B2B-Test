@@ -8,7 +8,7 @@ COUNT=${COUNT:-100}
 TIMEOUT=${TIMEOUT:-900}
 q() { psql -h localhost -U postgres -d mopay -tAc "$1"; }
 H=(-H "x-admin-token: ${ADMIN_TOKEN:-dev-admin-token}" -H 'content-type: application/json')
-curl -sf "${H[@]}" -X POST localhost:4000/admin/chaos/mobee -d '{"FAIL_RATE":0.3,"FAIL_AFTER_RATE":0.05}' >/dev/null
+curl -sf "${H[@]}" -X POST localhost:4000/admin/chaos/exchange -d '{"FAIL_RATE":0.3,"FAIL_AFTER_RATE":0.05}' >/dev/null
 curl -sf "${H[@]}" -X POST localhost:4000/admin/chaos/bifast -d '{"FAIL_RATE":0.3,"FAIL_AFTER_RATE":0.05,"DUPLICATE_CALLBACK_RATE":0.2,"DROP_CALLBACK_RATE":0.05}' >/dev/null
 echo "chaos on: FAIL_RATE=0.3 on both mocks (+ lost responses, duplicate and dropped callbacks)"
 base=$(q "select count(*) from deposits where status='completed'")

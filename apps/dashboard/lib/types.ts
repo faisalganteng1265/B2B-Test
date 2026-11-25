@@ -53,6 +53,7 @@ export interface Offramp {
   priceAsOf: string | null;
   priceSource: string | null;
   grossIdr: string | null;
+  exchangeFeeIdr: string | null;
   feeIdr: string | null;
   idrAmount: string | null;
   exchangeOrderId: string | null;
@@ -65,8 +66,8 @@ export interface Offramp {
 export interface Deposit {
   id: string;
   chainId: number;
-  clientId: string;
-  clientName?: string;
+  clientId: string | null;
+  clientName?: string | null;
   token: string;
   txHash: string;
   logIndex: number;
@@ -129,6 +130,8 @@ export interface ClientRow {
   status: string;
   subAccountId: string;
   apiKeyPrefix: string;
+  sharedDepositAddress: string | null;
+  wallets: { address: string; label: string | null; verifiedAt: string | null }[];
   depositAddresses: { chainId: number; address: string; source: string; current: boolean }[];
   bankAccounts: {
     id: string;
@@ -170,4 +173,28 @@ export interface ChaosConfig {
 export interface ChaosState {
   config: ChaosConfig;
   stats: { requests: number; failedBefore: number; failedAfter: number; timeouts: number };
+}
+
+export interface ExchangeView {
+  depositAddress: string | null;
+  network?: string;
+  error?: string;
+  account?: {
+    canTrade: boolean;
+    canWithdraw: boolean;
+    canWithdrawFiat: boolean;
+    accountType: string;
+    uid: number;
+    balances: { asset: string; free: string; locked: string }[];
+  };
+  bank?: { bankCode: string; accountNumber: string };
+  sweeps: {
+    id: string;
+    amountIdr: string;
+    feeIdr: string | null;
+    status: string;
+    exchangeOrderNo: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }[];
 }

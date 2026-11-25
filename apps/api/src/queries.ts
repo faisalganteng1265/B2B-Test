@@ -4,6 +4,7 @@ import {
   backfillChunks,
   clientBankAccounts,
   clients,
+  clientWallets,
   depositAddresses,
   deposits,
   indexerCheckpoints,
@@ -57,6 +58,7 @@ export function depositJson(
           priceAsOf: r.priceAsOf,
           priceSource: r.priceSource,
           grossIdr: str(r.grossIdr),
+          exchangeFeeIdr: str(r.exchangeFeeIdr),
           feeIdr: str(r.feeIdr),
           idrAmount: str(r.idrAmount),
           exchangeOrderId: r.exchangeOrderId,
@@ -81,7 +83,7 @@ export async function listDeposits(
     .select({ d: deposits, r: offrampRuns, clientName: clients.name })
     .from(deposits)
     .leftJoin(offrampRuns, eq(offrampRuns.depositId, deposits.id))
-    .innerJoin(clients, eq(clients.id, deposits.clientId))
+    .leftJoin(clients, eq(clients.id, deposits.clientId))
     .where(where)
     .orderBy(desc(deposits.firstSeenAt))
     .limit(Math.min(opts.limit ?? 100, 500));
@@ -106,7 +108,7 @@ export async function depositDetail(db: Db, id: string, clientId?: string) {
     .select({ d: deposits, r: offrampRuns, clientName: clients.name })
     .from(deposits)
     .leftJoin(offrampRuns, eq(offrampRuns.depositId, deposits.id))
-    .innerJoin(clients, eq(clients.id, deposits.clientId))
+    .leftJoin(clients, eq(clients.id, deposits.clientId))
     .where(and(eq(deposits.id, id), clientId ? eq(deposits.clientId, clientId) : undefined))
     .limit(1);
   const x = row[0];
@@ -278,6 +280,10 @@ export async function listClients(db: Db, chainId: number) {
   const ids = cs.map((c) => c.id);
   if (!ids.length) return [];
   const addrs = await db.select().from(depositAddresses).where(inArray(depositAddresses.clientId, ids));
+  const shared = await db.query.depositAddresses.findFirst({
+    where: and(eq(depositAddresses.chainId, chainId), eq(depositAddresses.kind, 'shared')),
+  });
+  const wallets = await db.select().from(clientWallets).where(inArray(clientWallets.clientId, ids));
   const banks = await db.select().from(clientBankAccounts).where(inArray(clientBankAccounts.clientId, ids));
   const stats = await db
     .select({
@@ -304,6 +310,10 @@ export async function listClients(db: Db, chainId: number) {
       subAccountId: c.exchangeSubaccount,
       apiKeyPrefix: c.apiKeyPrefix,
       createdAt: c.createdAt,
+      sharedDepositAddress: shared?.address ?? null,
+      wallets: wallets
+        .filter((w) => w.clientId === c.id)
+        .map((w) => ({ address: w.address, label: w.label, verifiedAt: w.verifiedAt })),
       depositAddresses: addrs
         .filter((a) => a.clientId === c.id)
         .map((a) => ({

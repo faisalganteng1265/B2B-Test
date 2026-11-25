@@ -2,7 +2,7 @@ import { serve } from '@hono/node-server';
 import * as clients from '@restatedev/restate-sdk-clients';
 import { CHAINS, loadDeployment } from '@mopay/config';
 import { createDb } from '@mopay/db';
-import { createLogger, MobeeClient } from '@mopay/shared';
+import { createLogger, IndodaxClient, PriceFeed } from '@mopay/shared';
 import { restateAwakeableResolver } from '@mopay/workflow';
 import { createApp } from './app';
 import { loadApiEnv } from './env';
@@ -25,12 +25,13 @@ const app = createApp({
   chainName: chain.name,
   explorerTxUrl: chain.explorerTxUrl,
   tokens: deployment.tokens,
-  mobee: new MobeeClient({
-    baseUrl: env.MOBEE_URL,
-    apiKey: env.MOBEE_API_KEY,
-    apiSecret: env.MOBEE_API_SECRET,
+  indodax: new IndodaxClient({
+    baseUrl: env.INDODAX_URL,
+    apiKey: env.INDODAX_API_KEY,
+    apiSecret: env.INDODAX_API_SECRET,
     timeoutMs: 8000,
   }),
+  priceFeed: new PriceFeed({ source: env.PRICE_SOURCE, fixedRate: env.PRICE_FIXED_RATE }),
   notifier,
   resolveAwakeable: restateAwakeableResolver(env.RESTATE_INGRESS_URL),
   submitWorkflow: async (key, depositId) =>

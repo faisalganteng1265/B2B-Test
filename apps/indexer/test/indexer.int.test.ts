@@ -55,6 +55,7 @@ function make(sim: SimChain, dispatcher: Dispatcher, over: Partial<IndexerOption
       concurrency: 4,
       leaseMs: 2000,
       sweeps: false,
+      chunkRetryBaseMs: 100,
       ...over,
     },
     log,
@@ -334,5 +335,78 @@ describe('sweeps (defense in depth)', () => {
     await waitFor(async () => (await depositByTx(tx))?.status === 'dispatched', 20_000, 50);
     expect((await depositByTx(tx))!.source).toBe('backfill');
     sim.getTransferLogsByRange = orig;
+  });
+});
+
+describe('shared exchange address (Indodax model): attribution by registered sender wallet', () => {
+  const SHARED = '0x0000000000000000000000000000000000005a5a';
+  const WALLET_A = '0x00000000000000000000000000000000000000f1';
+  const STRANGER = '0x00000000000000000000000000000000000000ee';
+
+  async function shared() {
+    const { depositAddresses, clientWallets, clients } = await import('@mopay/db');
+    const [c] = await h.db.select().from(clients).limit(1);
+    await h.db
+      .insert(depositAddresses)
+      .values({ chainId: CHAIN, address: SHARED, kind: 'shared', source: 'indodax' });
+    await h.db
+      .insert(clientWallets)
+      .values({ clientId: c!.id, chainId: CHAIN, address: WALLET_A, verifiedAt: new Date() });
+    return c!.id;
+  }
+
+  it('live path: registered sender → processed for that client; unknown sender → manual_review, never dispatched', async () => {
+    const clientId = await shared();
+    const sim = newSim();
+    const disp = new FakeDispatcher();
+    const idx = make(sim, disp);
+    await idx.init();
+    idx.start();
+    const ok = sim.transfer(USDT, WALLET_A, SHARED, 50_000_000n);
+    const bad = sim.transfer(USDT, STRANGER, SHARED, 70_000_000n);
+    sim.mine(1);
+    await waitFor(async () => (await depositByTx(bad))?.status === 'seen');
+    expect((await depositByTx(ok))!.clientId).toBe(clientId);
+    expect((await depositByTx(bad))!.clientId).toBeNull();
+    sim.mine(13);
+    await waitFor(async () => (await depositByTx(ok))?.status === 'dispatched');
+    const b = await waitFor(async () => {
+      const x = await depositByTx(bad);
+      return x?.status === 'manual_review' ? x : undefined;
+    });
+    expect(b.statusReason).toMatch(/UNATTRIBUTED/);
+    expect(disp.calls.size).toBe(1);
+  });
+
+  it('backfill path: an unknown sender in a final range is parked, never confirmed', async () => {
+    await shared();
+    const sim = newSim();
+    const bad = sim.transfer(USDT, STRANGER, SHARED, 70_000_000n);
+    const ok = sim.transfer(USDT, WALLET_A, SHARED, 10_000_000n);
+    sim.mine(400);
+    const disp = new FakeDispatcher();
+    const idx = make(sim, disp);
+    await idx.init();
+    idx.start();
+    await waitFor(async () => (await depositByTx(ok))?.status === 'dispatched');
+    const b = (await depositByTx(bad))!;
+    expect(b.status).toBe('manual_review');
+    expect(b.source).toBe('backfill');
+    expect(disp.calls.size).toBe(1);
+  });
+
+  it('the database refuses to confirm an unattributed deposit even if code tried', async () => {
+    await shared();
+    const sim = newSim();
+    const idx = make(sim, new FakeDispatcher());
+    await idx.init();
+    idx.start();
+    const bad = sim.transfer(USDT, STRANGER, SHARED, 1n);
+    sim.mine(1);
+    const d = await waitFor(() => depositByTx(bad));
+    await idx.stop();
+    await expect(
+      h.db.update(deposits).set({ status: 'confirmed' }).where(eq(deposits.id, d.id)),
+    ).rejects.toThrow();
   });
 });

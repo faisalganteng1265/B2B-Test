@@ -5,14 +5,16 @@ import {
   deposits,
   payouts,
   resetTestDb,
-  seed,
+  seedIndodax,
+  ledgerEntries,
   webhookEvents,
   type DbHandle,
   clientBankAccounts,
 } from '@mopay/db';
-import { Chaos, createLogger, generateApiKey, hmacHex, MobeeClient, PriceFeed } from '@mopay/shared';
-import { createMobeeApp, MobeeStore } from '@mopay/mobee-mock';
-import { createApp } from '../src/app';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { Chaos, createLogger, generateApiKey, hmacHex, IndodaxClient, PriceFeed } from '@mopay/shared';
+import { createIndodaxMock, IndodaxStore } from '@mopay/indodax-mock';
+import { createApp, walletRegistrationMessage } from '../src/app';
 import { loadApiEnv } from '../src/env';
 import { Notifier } from '../src/notifier';
 
@@ -28,34 +30,45 @@ const resolved: { id: string; payload: unknown }[] = [];
 const ADMIN = 'test-admin-token-123';
 const WEBHOOK = 'test-webhook-secret';
 
+let exchange: ReturnType<typeof createIndodaxMock>;
+let exchangeStore: IndodaxStore;
+const WALLET_A = privateKeyToAccount(generatePrivateKey());
+const WALLET_B = privateKeyToAccount(generatePrivateKey());
+
 beforeAll(async () => {
   h = await resetTestDb();
-  const mobeeApp = createMobeeApp({
-    store: new MobeeStore(':memory:'),
+  exchangeStore = new IndodaxStore(':memory:');
+  exchange = createIndodaxMock({
+    store: exchangeStore,
     priceFeed: new PriceFeed({ source: 'fixed', fixedRate: '16000' }),
-    chain: { getReceipt: async () => null, getBlockNumber: async () => 1n },
     chaos: new Chaos(),
-    apiKey: 'k',
-    apiSecret: 'mobee-test-secret',
+    apiKey: 'K',
+    apiSecret: 'indodax-test-secret-0123',
     adminToken: ADMIN,
     tokens: {},
-    chainId: 84532,
-    minConfirmations: 1,
+    tokenDecimals: 6,
+    network: 'base',
+    scanner: { head: async () => 1, logs: async () => [] },
+    scanStartBlock: 1,
+    minConfirm: 1,
     creditDelayMs: [0, 0],
-    quoteTtlMs: 30_000,
+    commissionBps: 41n,
+    orderVisibilityDelayMs: 0,
+    kycBank: { bankCode: '014', accountNumber: '5270011223', accountName: 'PT MOPAY' },
+    fiatWithdrawFeeIdr: 10_000n,
+    fiatSettleMs: 0,
     log,
   });
-  const mobee = new MobeeClient({
-    baseUrl: 'http://mobee',
-    apiKey: 'k',
-    apiSecret: 'mobee-test-secret',
-    fetchImpl: ((u: string, i?: RequestInit) => mobeeApp.request(u, i)) as typeof fetch,
+  const exFetch = ((u: string, i?: RequestInit) =>
+    exchange.app.request(u.replace(/^https?:\/\/[^/]+/, 'http://indodax'), i)) as typeof fetch;
+  const indodax = new IndodaxClient({
+    baseUrl: 'http://indodax',
+    apiKey: 'K',
+    apiSecret: 'indodax-test-secret-0123',
+    fetchImpl: exFetch,
   });
-  const created = await seed(
-    h.db,
-    84532,
-    async (sub) => (await mobee.createWalletAddress(sub, 84532)).address,
-  );
+  const [addr] = await indodax.depositAddresses('USDT', 'base');
+  const created = await seedIndodax(h.db, 84532, addr!.address, [WALLET_A.address]);
   keyA = created[0]!.apiKey;
   keyB = created[1]!.apiKey;
   clientA = created[0]!.clientId;
@@ -66,6 +79,8 @@ beforeAll(async () => {
     BIFAST_WEBHOOK_SECRET: WEBHOOK,
     RATE_LIMIT_PER_MIN: '1000',
     DEMO_TX_ENABLED: 'false',
+    MOPAY_BANK_CODE: '014',
+    MOPAY_BANK_ACCOUNT: '5270011223',
   });
   const notifier = new Notifier(h.sql, log);
   await notifier.start();
@@ -77,12 +92,12 @@ beforeAll(async () => {
     chainName: 'base-sepolia',
     explorerTxUrl: (x) => `https://sepolia.basescan.org/tx/${x}`,
     tokens: { USDT: '0xd3dd2744a70188e5fdd17f302d1003e37e2df7c0' },
-    mobee,
+    indodax,
+    priceFeed: new PriceFeed({ source: 'fixed', fixedRate: '16000' }),
     notifier,
     resolveAwakeable: async (id, payload) => void resolved.push({ id, payload }),
     submitWorkflow: async (key) => (submitted.push(key), 'Accepted'),
-    fetchImpl: ((u: string, i?: RequestInit) =>
-      mobeeApp.request(u.replace(/^https?:\/\/[^/]+/, 'http://mobee'), i)) as typeof fetch,
+    fetchImpl: exFetch,
   });
 });
 afterAll(async () => h?.close());
@@ -146,15 +161,46 @@ describe('client auth', () => {
 });
 
 describe('B2B endpoints', () => {
-  it('deposit address is idempotent per client and chain', async () => {
-    const r1 = (await (
+  it("deposit instructions: the shared exchange address plus the client's registered wallets", async () => {
+    const r = (await (
       await app.request('/v1/deposit-addresses', { method: 'POST', headers: auth(keyA) })
-    ).json()) as { address: string };
-    const r2 = (await (
-      await app.request('/v1/deposit-addresses', { method: 'POST', headers: auth(keyA) })
-    ).json()) as { address: string };
-    expect(r1.address).toMatch(/^0x[0-9a-f]{40}$/);
-    expect(r2.address).toBe(r1.address);
+    ).json()) as {
+      address: string;
+      kind: string;
+      registeredWallets: string[];
+    };
+    const rB = (await (
+      await app.request('/v1/deposit-addresses', { method: 'POST', headers: auth(keyB) })
+    ).json()) as { address: string; registeredWallets: string[] };
+    expect(r.address).toMatch(/^0x[0-9a-f]{40}$/);
+    expect(rB.address).toBe(r.address); // ONE address per exchange account
+    expect(r.kind).toBe('shared');
+    expect(r.registeredWallets).toEqual([WALLET_A.address.toLowerCase()]);
+    expect(rB.registeredWallets).toEqual([]);
+  });
+
+  it('registers a sender wallet only with a valid ownership signature; one client per wallet', async () => {
+    const msgB = walletRegistrationMessage(clientB, WALLET_B.address);
+    const post = (key: string, body: unknown) =>
+      app.request('/v1/wallets', {
+        method: 'POST',
+        headers: { ...auth(key), 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    // signature for a different client id → rejected
+    const wrong = await WALLET_B.signMessage({
+      message: walletRegistrationMessage(clientA, WALLET_B.address),
+    });
+    expect((await post(keyB, { address: WALLET_B.address, signature: wrong })).status).toBe(400);
+    const sig = await WALLET_B.signMessage({ message: msgB });
+    const ok = await post(keyB, { address: WALLET_B.address, signature: sig });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ address: WALLET_B.address.toLowerCase(), verified: true });
+    // client A cannot take B's wallet even with a valid signature for A
+    const sigA = await WALLET_B.signMessage({
+      message: walletRegistrationMessage(clientA, WALLET_B.address),
+    });
+    expect((await post(keyA, { address: WALLET_B.address, signature: sigA })).status).toBe(409);
   });
 
   it('only shows a client its own deposits', async () => {
@@ -175,7 +221,7 @@ describe('B2B endpoints', () => {
     expect(det.ledger).toBeUndefined(); // internal detail not exposed to clients
   });
 
-  it('indicative quote: VWAP rate, fee rounded up, net = gross - fee', async () => {
+  it('indicative quote: VWAP on the bid book, exchange commission and Mopay fee rounded up', async () => {
     const r = await app.request('/v1/quotes/indicative?amount=1000', { headers: auth(keyA) });
     expect(r.status).toBe(200);
     const q = (await r.json()) as Record<string, string>;
@@ -183,8 +229,9 @@ describe('B2B endpoints', () => {
       amount: '1000',
       rate: '16000',
       grossIdr: '16000000',
-      feeIdr: '56000',
-      netIdr: '15944000',
+      exchangeFeeIdr: '65600', // 0.41%
+      feeIdr: '56000', // 0.35%
+      netIdr: '15878400',
       indicative: true,
     });
     expect((await app.request('/v1/quotes/indicative?amount=abc', { headers: auth(keyA) })).status).toBe(400);
@@ -198,6 +245,7 @@ describe('B2B endpoints', () => {
         '/v1/deposits',
         '/v1/deposits/{id}',
         '/v1/quotes/indicative',
+        '/v1/wallets',
       ]),
     );
     expect((await app.request('/docs')).status).toBe(200);
@@ -286,7 +334,7 @@ describe('admin', () => {
   });
 
   it('proxies chaos settings to the mocks', async () => {
-    const r = await app.request('/admin/chaos/mobee', {
+    const r = await app.request('/admin/chaos/exchange', {
       method: 'POST',
       headers: { ...admin, 'content-type': 'application/json' },
       body: JSON.stringify({ FAIL_RATE: 0.5 }),
@@ -316,6 +364,78 @@ describe('admin', () => {
     expect(buf).toContain('event: hello');
     expect(buf).toContain('event: deposit');
     expect(buf).toContain('event: metrics');
+  });
+});
+
+describe('admin: exchange operations', () => {
+  it('assigns an unattributed deposit (unknown sender) to a client and re-drives it', async () => {
+    const [d] = await h.db
+      .insert(deposits)
+      .values({
+        chainId: 84532,
+        tokenAddress: '0xt',
+        tokenSymbol: 'USDT',
+        txHash: `0x${'77'.repeat(32)}`,
+        logIndex: 0,
+        blockNumber: 7,
+        blockHash: '0xb',
+        fromAddress: '0x00000000000000000000000000000000000000ee',
+        toAddress: '0xa',
+        amountBaseUnits: 9_000_000n,
+        clientId: null,
+        source: 'live',
+        workflowId: '84532:unattributed:0',
+        status: 'seen',
+      })
+      .returning();
+    await h.db
+      .update(deposits)
+      .set({ status: 'manual_review', statusReason: 'UNATTRIBUTED: sender ...' })
+      .where(eq(deposits.id, d!.id));
+    const post = (body: unknown) =>
+      app.request(`/admin/deposits/${d!.id}/assign`, {
+        method: 'POST',
+        headers: { ...admin, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    const r = await post({ clientId: clientB, registerWallet: true });
+    expect(r.status).toBe(200);
+    const after = (await h.db.query.deposits.findFirst({ where: eq(deposits.id, d!.id) }))!;
+    expect(after).toMatchObject({ clientId: clientB, status: 'dispatched' });
+    expect(submitted).toContain('84532:unattributed:0#retry-1');
+    expect((await post({ clientId: clientA })).status).toBe(409); // already assigned
+  });
+
+  it("treasury sweep: IDR from the exchange to Mopay's KYC bank, idempotent, journal posted once", async () => {
+    await app.request('/admin/chaos/exchange', {
+      method: 'POST',
+      headers: { ...admin, 'content-type': 'application/json' },
+      body: JSON.stringify({ FAIL_RATE: 0 }),
+    });
+    exchangeStore.addBalance('IDR', 2_000_000n);
+    const r = await app.request('/admin/treasury/sweep', {
+      method: 'POST',
+      headers: { ...admin, 'content-type': 'application/json' },
+      body: JSON.stringify({ amount: '1500000' }),
+    });
+    expect(r.status).toBe(200);
+    const view = (await (await app.request('/admin/exchange', { headers: admin })).json()) as {
+      sweeps: { status: string; feeIdr: string }[];
+      account: { balances: { asset: string; free: string }[] };
+    };
+    expect(view.sweeps[0]).toMatchObject({ status: 'success', feeIdr: '10000' });
+    expect(view.account.balances.find((b) => b.asset === 'IDR')!.free).toBe('500000');
+    await app.request('/admin/exchange', { headers: admin }); // reconcile again: no double journal
+    const lines = await h.db.select().from(ledgerEntries);
+    const sweep = lines.filter((l) => l.journalId.startsWith('sweep:'));
+    expect(sweep).toHaveLength(3);
+    expect(sweep.find((l) => l.account === 'mopay_bank_idr')!.debit).toBe(1_490_000n);
+    const tooSmall = await app.request('/admin/treasury/sweep', {
+      method: 'POST',
+      headers: { ...admin, 'content-type': 'application/json' },
+      body: JSON.stringify({ amount: '100000' }),
+    });
+    expect(tooSmall.status).toBe(400);
   });
 });
 

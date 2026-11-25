@@ -8,21 +8,28 @@ import { serve, type ServerType } from '@hono/node-server';
 import { Hono } from 'hono';
 import * as restate from '@restatedev/restate-sdk';
 import * as clients from '@restatedev/restate-sdk-clients';
-import { encodeAbiParameters, encodeEventTopics, erc20Abi, type Hex } from 'viem';
+import type { Hex } from 'viem';
 import { eq, sql } from 'drizzle-orm';
 import { repoRoot } from '@mopay/config';
 import {
   deposits,
-  depositAddresses,
   clients as clientsTbl,
   resetTestDb,
-  seed,
+  seedIndodax,
+  clientWallets,
   findUnbalancedJournals,
   payouts,
   type DbHandle,
 } from '@mopay/db';
-import { BifastClient, Chaos, createLogger, depositWorkflowId, MobeeClient, PriceFeed } from '@mopay/shared';
-import { createMobeeApp, MobeeStore, type ReceiptLike } from '@mopay/mobee-mock';
+import {
+  BifastClient,
+  Chaos,
+  createLogger,
+  depositWorkflowId,
+  IndodaxClient,
+  PriceFeed,
+} from '@mopay/shared';
+import { createIndodaxMock, IndodaxStore, type TransferLog } from '@mopay/indodax-mock';
 import { createBifast } from '@mopay/bifast-mock';
 import {
   createOfframpWorkflow,
@@ -37,13 +44,18 @@ export const PORTS = {
   admin: 19070,
   node: 15122,
   workflow: 19080,
-  mobee: 14100,
+  indodax: 14100,
   bifast: 14200,
   webhook: 14000,
 };
 const CHAIN = 84532;
 const USDT = '0x00000000000000000000000000000000000000aa';
-const SECRET = { mobee: 'test-mobee-secret', bifastWebhook: 'test-webhook-secret' };
+const SECRET = {
+  indodaxKey: 'TEST-INDODAX-KEY',
+  indodax: 'test-indodax-secret-0123456789',
+  bifastWebhook: 'test-webhook-secret',
+};
+const SENDERS = ['0x00000000000000000000000000000000000000c1', '0x00000000000000000000000000000000000000c2'];
 export const log = createLogger('wf-test', process.env.TEST_LOG ?? 'silent');
 
 async function waitHttp(url: string, timeoutMs = 30_000) {
@@ -67,19 +79,23 @@ export class Harness {
   wfServer: http2.Http2Server | null = null;
   sessions = new Set<http2.ServerHttp2Session>();
   servers: ServerType[] = [];
-  mobeeChaos = new Chaos();
+  exchangeChaos = new Chaos();
   bifastChaos = new Chaos();
-  mobeeStore = new MobeeStore(':memory:');
-  receipts = new Map<string, ReceiptLike>();
-  head = 1000n;
+  exchangeStore = new IndodaxStore(':memory:');
+  /** on-chain transfers the mock exchange's deposit scanner can see */
+  chainLogs: TransferLog[] = [];
+  head = 1000;
+  scanTick: NodeJS.Timeout | null = null;
+  sharedAddress = '';
   bifastTick: NodeJS.Timeout | null = null;
   ingress = clients.connect({ url: `http://127.0.0.1:${PORTS.ingress}` });
-  mobee = new MobeeClient({
-    baseUrl: `http://127.0.0.1:${PORTS.mobee}`,
-    apiKey: 'k',
-    apiSecret: SECRET.mobee,
+  indodax = new IndodaxClient({
+    baseUrl: `http://127.0.0.1:${PORTS.indodax}`,
+    apiKey: SECRET.indodaxKey,
+    apiSecret: SECRET.indodax,
     timeoutMs: 1500,
   });
+  priceFeed = new PriceFeed({ source: 'fixed', fixedRate: '16250' });
   bifastClient = new BifastClient({
     baseUrl: `http://127.0.0.1:${PORTS.bifast}`,
     apiKey: 'pjp',
@@ -87,14 +103,15 @@ export class Harness {
   });
   bifastDb!: ReturnType<typeof createBifast>['db'];
   webhookCalls = 0;
-  mobeeDeps!: Parameters<typeof createMobeeApp>[0];
-  /** delay injected into mobee confirm (to kill the workflow mid-swap) */
+  exchangeDeps!: Parameters<typeof createIndodaxMock>[0];
+  /** delay injected into POST /api/v2/order (to kill the workflow mid-sell) */
   confirmDelayMs = 0;
 
   cfg: OfframpConfig = {
     minAmountBaseUnits: 1_000_000n,
     feeBps: 35n,
-    maxQuoteAttempts: 5,
+    maxSlippageBps: 50n,
+    fillPollMs: 150,
     creditPollMs: 150,
     creditPollMaxMs: 600,
     payoutCallbackTimeoutMs: 1500,
@@ -122,30 +139,43 @@ export class Harness {
       },
     );
 
-    // mobee-mock with a fake chain (receipts registered by the test) and a fixed price
-    this.mobeeDeps = {
-      store: this.mobeeStore,
-      priceFeed: new PriceFeed({ source: 'fixed', fixedRate: '16250' }),
-      chain: { getReceipt: async (h) => this.receipts.get(h) ?? null, getBlockNumber: async () => this.head },
-      chaos: this.mobeeChaos,
-      apiKey: 'k',
-      apiSecret: SECRET.mobee,
+    // indodax-mock (TAPIv2) with a fake chain scanner (transfers registered by the test) and a fixed book
+    this.exchangeDeps = {
+      store: this.exchangeStore,
+      priceFeed: this.priceFeed,
+      chaos: this.exchangeChaos,
+      apiKey: SECRET.indodaxKey,
+      apiSecret: SECRET.indodax,
       adminToken: 'admin-token',
       tokens: { [USDT]: 'USDT' },
-      chainId: CHAIN,
-      minConfirmations: 1,
+      tokenDecimals: 6,
+      network: 'base',
+      scanner: {
+        head: async () => this.head,
+        logs: async (from, to, address) =>
+          this.chainLogs.filter((l) => l.blockNumber >= from && l.blockNumber <= to && l.to === address),
+      },
+      scanStartBlock: 1,
+      minConfirm: 1,
       creditDelayMs: [0, 300],
-      quoteTtlMs: 30_000,
+      commissionBps: 41n,
+      orderVisibilityDelayMs: 300,
+      kycBank: { bankCode: '014', accountNumber: '5270011223', accountName: 'PT MOPAY' },
+      fiatWithdrawFeeIdr: 10_000n,
+      fiatSettleMs: 500,
       log,
     };
-    const mobeeApp = createMobeeApp(this.mobeeDeps);
-    const slowConfirm = new Hono();
-    slowConfirm.use('/v1/quick-swap/confirm', async (_c, next) => {
-      if (this.confirmDelayMs) await new Promise((r) => setTimeout(r, this.confirmDelayMs));
+    const exchange = createIndodaxMock(this.exchangeDeps);
+    this.sharedAddress = exchange.depositAddress('USDT');
+    this.scanTick = setInterval(() => void exchange.scanOnce().catch(() => {}), 100);
+    const slowOrder = new Hono();
+    slowOrder.use('/api/v2/order', async (c, next) => {
+      if (this.confirmDelayMs && c.req.method === 'POST')
+        await new Promise((r) => setTimeout(r, this.confirmDelayMs));
       await next();
     });
-    slowConfirm.route('/', mobeeApp);
-    this.servers.push(serve({ fetch: slowConfirm.fetch, port: PORTS.mobee }));
+    slowOrder.route('/', exchange.app);
+    this.servers.push(serve({ fetch: slowOrder.fetch, port: PORTS.indodax }));
 
     const bifast = createBifast({
       dbPath: ':memory:',
@@ -180,14 +210,16 @@ export class Harness {
     this.startWorkflow();
     await registerDeployment(`http://127.0.0.1:${PORTS.admin}`, `http://127.0.0.1:${PORTS.workflow}`);
 
-    // clients + deposit addresses issued by mobee-mock
-    await seed(this.h.db, CHAIN, async (sub) => (await this.mobee.createWalletAddress(sub, CHAIN)).address);
+    // clients + their registered wallets + the exchange's shared deposit address
+    const [addr] = await this.indodax.depositAddresses('USDT', 'base');
+    await seedIndodax(this.h.db, CHAIN, addr!.address, SENDERS);
   }
 
   startWorkflow() {
     const wf = createOfframpWorkflow({
       db: this.h.db,
-      mobee: this.mobee,
+      indodax: this.indodax,
+      priceFeed: this.priceFeed,
       bifast: this.bifastClient,
       cfg: this.cfg,
       log,
@@ -210,6 +242,7 @@ export class Harness {
 
   async stop() {
     if (this.bifastTick) clearInterval(this.bifastTick);
+    if (this.scanTick) clearInterval(this.scanTick);
     await this.killWorkflow().catch(() => {});
     for (const s of this.servers) s.close();
     this.restateProc?.kill('SIGKILL');
@@ -217,27 +250,26 @@ export class Harness {
     rmSync(this.restateDir, { recursive: true, force: true });
   }
 
-  /** Create an on-chain-looking deposit: register its receipt and insert it as `dispatched`. */
+  /** Create an on-chain-looking deposit from a client's registered wallet to the shared address. */
   async createDeposit(clientIndex: number, amount: bigint) {
     const rows = await this.h.db
-      .select({ clientId: clientsTbl.id, address: depositAddresses.address })
+      .select({ clientId: clientsTbl.id, wallet: clientWallets.address })
       .from(clientsTbl)
-      .innerJoin(depositAddresses, eq(depositAddresses.clientId, clientsTbl.id))
+      .innerJoin(clientWallets, eq(clientWallets.clientId, clientsTbl.id))
       .orderBy(clientsTbl.createdAt);
     const c = rows[clientIndex % rows.length]!;
     const txHash = `0x${randomBytes(32).toString('hex')}` as Hex;
-    const topics = encodeEventTopics({
-      abi: erc20Abi,
-      eventName: 'Transfer',
-      args: { from: '0x00000000000000000000000000000000000000c1', to: c.address as Hex },
-    }) as Hex[];
-    this.receipts.set(txHash, {
-      status: 'success',
-      blockNumber: 990n,
-      logs: [
-        { address: USDT, topics, data: encodeAbiParameters([{ type: 'uint256' }], [amount]), logIndex: 0 },
-      ],
+    this.head += 1;
+    this.chainLogs.push({
+      txHash,
+      logIndex: 0,
+      blockNumber: this.head,
+      from: c.wallet,
+      to: this.sharedAddress,
+      token: USDT,
+      value: amount,
     });
+    this.head += 1; // one confirmation on top
     const workflowId = depositWorkflowId(CHAIN, txHash, 0);
     const [d] = await this.h.db
       .insert(deposits)
@@ -247,10 +279,10 @@ export class Harness {
         tokenSymbol: 'USDT',
         txHash,
         logIndex: 0,
-        blockNumber: 990,
+        blockNumber: this.head - 1,
         blockHash: `0x${'b'.repeat(64)}`,
-        fromAddress: '0xc1',
-        toAddress: c.address,
+        fromAddress: c.wallet,
+        toAddress: this.sharedAddress,
         amountBaseUnits: amount,
         clientId: c.clientId,
         status: 'confirmed',
@@ -262,7 +294,7 @@ export class Harness {
       .update(deposits)
       .set({ status: 'dispatched', dispatchedAt: new Date() })
       .where(eq(deposits.id, d!.id));
-    return { id: d!.id, workflowId, txHash };
+    return { id: d!.id, workflowId, txHash, clientId: c.clientId };
   }
 
   submit(workflowId: string, depositId: string) {
@@ -290,12 +322,15 @@ export class Harness {
         ok: sql<number>`count(*) filter (where status = 'success')::int`,
       })
       .from(payouts);
-    const mobeeOrders = this.mobeeStore.orderCount();
-    const dupQuotes = this.mobeeStore.db
-      .prepare(
-        'SELECT count(*) AS n FROM (SELECT quote_id FROM orders GROUP BY quote_id HAVING count(*) > 1)',
+    const exchangeOrders = (
+      this.exchangeStore.db.prepare('SELECT count(*) AS n FROM orders').get() as { n: number }
+    ).n;
+    // one sell per deposit: client order ids are derived from the deposit's workflow id
+    const ordersWithoutSwap = (
+      await this.h.db.execute<{ n: number }>(
+        sql`SELECT count(*)::int AS n FROM offramp_runs WHERE exchange_order_id IS NOT NULL`,
       )
-      .get() as { n: number };
+    )[0]!.n;
     const bf = this.bifastDb
       .prepare('SELECT count(*) AS n, count(DISTINCT idempotency_key) AS k FROM transfers')
       .get() as { n: number; k: number };
@@ -304,8 +339,8 @@ export class Harness {
       completed: counts.completed ?? 0,
       payouts: Number(p?.n ?? 0),
       payoutsSuccess: Number(p?.ok ?? 0),
-      mobeeOrders,
-      duplicateOrdersPerQuote: dupQuotes.n,
+      exchangeOrders,
+      runsWithSell: Number(ordersWithoutSwap),
       bifastTransfers: bf.n,
       bifastDistinctKeys: bf.k,
     };

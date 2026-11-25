@@ -3,22 +3,22 @@ import { streamSSE } from 'hono/streaming';
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
 import { swaggerUI } from '@hono/swagger-ui';
 import { and, asc, eq, sql } from 'drizzle-orm';
-import { auditLog, clients, depositAddresses, deposits, type Db } from '@mopay/db';
+import { auditLog, clients, clientWallets, deposits, type Db } from '@mopay/db';
+import { verifyMessage, type Hex } from 'viem';
 import {
   errMsg,
-  feeIdr,
-  formatDecimal,
-  MobeeClient,
+  IndodaxClient,
+  PriceFeed,
   parseToken,
   sendTokenTransfers,
   UpstreamError,
   type Logger,
-  type MobeePrice,
 } from '@mopay/shared';
 import { handleBifastCallback, type PayoutSignal } from '@mopay/workflow';
 import { adminAuth, clientAuth, type AuthEnv } from './auth';
 import type { ApiEnv } from './env';
 import type { Notifier } from './notifier';
+import { indicativeQuote, priceView, sharedDepositAddress, Treasury } from './exchange';
 import {
   alerts,
   depositCounts,
@@ -38,7 +38,10 @@ export interface ApiDeps {
   chainName: string;
   explorerTxUrl: (h: string) => string | null;
   tokens: Record<string, string>; // symbol -> address
-  mobee: MobeeClient;
+  /** exchange (PAKD): INDODAX Trade API 2.0 */
+  indodax: IndodaxClient;
+  /** real public Indodax order book */
+  priceFeed: PriceFeed;
   notifier: Notifier;
   resolveAwakeable: (id: string, payload: PayoutSignal) => Promise<void>;
   submitWorkflow: (workflowId: string, depositId: string) => Promise<string>;
@@ -89,13 +92,23 @@ const DepositDetailSchema = DepositSchema.extend({ timeline: z.array(TimelineSch
   .passthrough()
   .openapi('DepositDetail');
 const DepositAddressSchema = z
-  .object({ chainId: z.number(), address: z.string(), source: z.string(), createdAt: z.string() })
-  .openapi('DepositAddress');
+  .object({
+    chainId: z.number(),
+    address: z.string(),
+    source: z.string(),
+    kind: z.literal('shared'),
+    createdAt: z.string(),
+    registeredWallets: z.array(z.string()),
+    instructions: z.string(),
+  })
+  .openapi('DepositInstructions');
 const QuoteSchema = z
   .object({
     amount: z.string(),
     rate: z.string(),
     grossIdr: z.string(),
+    exchangeFeeIdr: z.string(),
+    exchangeFeeBps: z.string(),
     feeIdr: z.string(),
     netIdr: z.string(),
     feeBps: z.string(),
@@ -109,6 +122,9 @@ const QuoteSchema = z
 
 const json = <T>(v: T) =>
   JSON.parse(JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString() : x))) as T;
+
+export const walletRegistrationMessage = (clientId: string, address: string) =>
+  `Mopay wallet registration\nclient:${clientId}\nwallet:${address.toLowerCase()}`;
 
 export function createApp(d: ApiDeps) {
   const app = new OpenAPIHono<AuthEnv>({
@@ -142,6 +158,7 @@ export function createApp(d: ApiDeps) {
     description: 'mpk_… client API key',
   });
   app.use('/v1/deposit-addresses', clientAuth(d.db, d.env.RATE_LIMIT_PER_MIN));
+  app.use('/v1/wallets', clientAuth(d.db, d.env.RATE_LIMIT_PER_MIN));
   app.use('/v1/deposits', clientAuth(d.db, d.env.RATE_LIMIT_PER_MIN));
   app.use('/v1/deposits/*', clientAuth(d.db, d.env.RATE_LIMIT_PER_MIN));
   app.use('/v1/quotes/*', clientAuth(d.db, d.env.RATE_LIMIT_PER_MIN));
@@ -150,9 +167,11 @@ export function createApp(d: ApiDeps) {
     createRoute({
       method: 'post',
       path: '/v1/deposit-addresses',
-      summary: 'Get (or create) the USDT deposit address for this client',
+      summary: 'Where to send USDT',
       description:
-        'Issued by the exchange (PAKD) for the client sub-account. Idempotent: one address per chain.',
+        "Returns Mopay's deposit address at the exchange (Indodax gives ONE address per account). Deposits are " +
+        'attributed to you by the SENDER: only transfers from your registered wallets (POST /v1/wallets) are ' +
+        'processed. Transfers from any other wallet are held for manual review.',
       security: [{ ApiKey: [] }],
       request: {
         body: {
@@ -162,7 +181,7 @@ export function createApp(d: ApiDeps) {
       },
       responses: {
         200: {
-          description: 'Deposit address',
+          description: 'Deposit instructions',
           content: { 'application/json': { schema: DepositAddressSchema } },
         },
         401: { description: 'Unauthorized', content: { 'application/json': { schema: ErrorSchema } } },
@@ -170,42 +189,114 @@ export function createApp(d: ApiDeps) {
     }),
     async (c) => {
       const client = c.get('client');
-      const body = c.req.valid('json') ?? {};
-      const chainId = body.chainId ?? d.chainId;
+      const chainId = (c.req.valid('json') ?? {}).chainId ?? d.chainId;
       if (chainId !== d.chainId)
         return c.json(
           { error: { code: 'UNSUPPORTED_CHAIN', message: `only chain ${d.chainId}` } },
           400,
         ) as never;
-      const existing = await d.db.query.depositAddresses.findFirst({
-        where: and(eq(depositAddresses.clientId, client.id), eq(depositAddresses.chainId, chainId)),
-      });
-      if (existing)
+      const shared = await sharedDepositAddress(d.db, chainId);
+      if (!shared)
         return c.json(
-          {
-            chainId,
-            address: existing.address,
-            source: existing.source,
-            createdAt: existing.createdAt.toISOString(),
-          },
-          200,
-        );
-      const a = await d.mobee.createWalletAddress(client.exchangeSubaccount, chainId);
-      await d.db
-        .insert(depositAddresses)
-        .values({ clientId: client.id, chainId, address: a.address.toLowerCase(), source: 'mobee' })
-        .onConflictDoNothing();
-      await d.db.insert(auditLog).values({
-        actor: `client:${client.id}`,
-        action: 'deposit_address_created',
-        entity: 'client',
-        entityId: client.id,
-        data: { address: a.address },
-      });
+          { error: { code: 'NOT_READY', message: 'exchange deposit address not provisioned' } },
+          503,
+        ) as never;
+      const wallets = await d.db
+        .select()
+        .from(clientWallets)
+        .where(and(eq(clientWallets.clientId, client.id), eq(clientWallets.chainId, chainId)));
       return c.json(
-        { chainId, address: a.address.toLowerCase(), source: 'mobee', createdAt: new Date().toISOString() },
+        {
+          chainId,
+          address: shared.address,
+          source: shared.source,
+          kind: 'shared' as const,
+          createdAt: shared.createdAt.toISOString(),
+          registeredWallets: wallets.map((w) => w.address),
+          instructions: 'Send USDT only from a registered wallet. Register wallets with POST /v1/wallets.',
+        },
         200,
       );
+    },
+  );
+
+  app.openapi(
+    createRoute({
+      method: 'post',
+      path: '/v1/wallets',
+      summary: 'Register a sender wallet (proof of ownership)',
+      description:
+        'Sign the message returned in the 400 response (or: "Mopay wallet registration\\nclient:<clientId>\\nwallet:<lowercase address>") ' +
+        'with the wallet (EIP-191 personal_sign). Deposits from this wallet are then attributed to you.',
+      security: [{ ApiKey: [] }],
+      request: {
+        body: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: z.object({
+                address: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+                signature: z.string().regex(/^0x[0-9a-fA-F]+$/),
+                label: z.string().max(80).optional(),
+              }),
+            },
+          },
+        },
+      },
+      responses: {
+        200: {
+          description: 'Registered',
+          content: {
+            'application/json': { schema: z.object({ address: z.string(), verified: z.boolean() }) },
+          },
+        },
+        400: { description: 'Bad signature', content: { 'application/json': { schema: ErrorSchema } } },
+        409: {
+          description: 'Wallet belongs to another client',
+          content: { 'application/json': { schema: ErrorSchema } },
+        },
+      },
+    }),
+    async (c) => {
+      const client = c.get('client');
+      const b = c.req.valid('json');
+      const address = b.address.toLowerCase();
+      const message = walletRegistrationMessage(client.id, address);
+      const ok = await verifyMessage({
+        address: b.address as Hex,
+        message,
+        signature: b.signature as Hex,
+      }).catch(() => false);
+      if (!ok)
+        return c.json(
+          { error: { code: 'INVALID_SIGNATURE', message: `sign exactly: ${JSON.stringify(message)}` } },
+          400,
+        );
+      const existing = await d.db.query.clientWallets.findFirst({
+        where: and(eq(clientWallets.chainId, d.chainId), eq(clientWallets.address, address)),
+      });
+      if (existing && existing.clientId !== client.id)
+        return c.json(
+          { error: { code: 'WALLET_TAKEN', message: 'wallet registered to another client' } },
+          409,
+        );
+      if (!existing) {
+        await d.db.insert(clientWallets).values({
+          clientId: client.id,
+          chainId: d.chainId,
+          address,
+          label: b.label,
+          verifiedAt: new Date(),
+        });
+        await d.db.insert(auditLog).values({
+          actor: `client:${client.id}`,
+          action: 'wallet_registered',
+          entity: 'client',
+          entityId: client.id,
+          data: { address },
+        });
+      }
+      return c.json({ address, verified: true }, 200);
     },
   );
 
@@ -284,23 +375,8 @@ export function createApp(d: ApiDeps) {
       const amount = parseToken(c.req.valid('query').amount);
       if (amount <= 0n)
         return c.json({ error: { code: 'VALIDATION', message: 'amount must be > 0' } }, 400) as never;
-      const q = await d.mobee.calculate(c.get('client').exchangeSubaccount, amount);
-      const gross = BigInt(q.idrAmount);
-      const fee = feeIdr(gross, d.env.FEE_BPS);
       return c.json(
-        {
-          amount: formatDecimal(amount, 6),
-          rate: q.rate,
-          grossIdr: gross.toString(),
-          feeIdr: fee.toString(),
-          netIdr: (gross - fee).toString(),
-          feeBps: d.env.FEE_BPS.toString(),
-          priceSource: q.priceSource,
-          priceAsOf: q.priceAsOf,
-          stale: q.stale,
-          slippageBps: q.slippageBps,
-          indicative: true as const,
-        },
+        await indicativeQuote(d.priceFeed, amount, d.env.INDODAX_COMMISSION_BPS, d.env.FEE_BPS),
         200,
       );
     },
@@ -344,21 +420,19 @@ function adminRoutes(d: ApiDeps) {
   a.use('/v1/stream', adminAuth(d.env.ADMIN_TOKEN));
   a.use('/admin/*', adminAuth(d.env.ADMIN_TOKEN));
 
-  let priceCache: { at: number; value: MobeePrice } | null = null;
   async function price() {
-    if (priceCache && Date.now() - priceCache.at < 2000) return { ...priceCache.value, cached: true };
-    for (let i = 0; i < 3; i++) {
-      try {
-        const value = await d.mobee.price(parseToken('10000'));
-        priceCache = { at: Date.now(), value };
-        return value;
-      } catch {
-        /* chaos on the mock: retry quickly */
-      }
+    try {
+      return await priceView(d.priceFeed);
+    } catch {
+      return null;
     }
-    if (priceCache) return { ...priceCache.value, stale: true, feedError: true };
-    return null;
   }
+  const treasury = new Treasury(
+    d.db,
+    d.indodax,
+    { bankCode: d.env.MOPAY_BANK_CODE, accountNumber: d.env.MOPAY_BANK_ACCOUNT },
+    d.log,
+  );
 
   async function overview() {
     const [idx, counts, today, al, p] = await Promise.all([
@@ -480,10 +554,10 @@ function adminRoutes(d: ApiDeps) {
 
   // Chaos control (proxied to the mocks' /__chaos).
   const chaosTarget = (t: string) =>
-    t === 'mobee' ? `${d.env.MOBEE_URL}/__chaos` : t === 'bifast' ? `${d.env.BIFAST_URL}/__chaos` : null;
+    t === 'exchange' ? `${d.env.INDODAX_URL}/__chaos` : t === 'bifast' ? `${d.env.BIFAST_URL}/__chaos` : null;
   a.get('/admin/chaos', async (c) => {
     const out: Record<string, unknown> = {};
-    for (const t of ['mobee', 'bifast']) {
+    for (const t of ['exchange', 'bifast']) {
       try {
         const r = await fetchImpl(chaosTarget(t)!, {
           headers: { 'x-admin-token': d.env.ADMIN_TOKEN },
@@ -498,7 +572,8 @@ function adminRoutes(d: ApiDeps) {
   });
   a.post('/admin/chaos/:target', async (c) => {
     const url = chaosTarget(c.req.param('target'));
-    if (!url) return c.json({ error: { code: 'VALIDATION', message: 'target must be mobee|bifast' } }, 400);
+    if (!url)
+      return c.json({ error: { code: 'VALIDATION', message: 'target must be exchange|bifast' } }, 400);
     const body = await c.req.text();
     const r = await fetchImpl(url, {
       method: 'POST',
@@ -546,11 +621,12 @@ function adminRoutes(d: ApiDeps) {
           { error: { code: 'NO_WALLET', message: `no demo wallet configured for client #${idx}` } },
           400,
         );
-      const addr = await d.db.query.depositAddresses.findFirst({
-        where: and(eq(depositAddresses.clientId, t.id), eq(depositAddresses.chainId, d.chainId)),
-      });
+      const addr = await sharedDepositAddress(d.db, d.chainId);
       if (!addr)
-        return c.json({ error: { code: 'NO_ADDRESS', message: 'client has no deposit address' } }, 400);
+        return c.json(
+          { error: { code: 'NO_ADDRESS', message: 'exchange deposit address not provisioned' } },
+          400,
+        );
       const n = Math.min(perClient, remaining);
       remaining -= n;
       if (n <= 0) continue;
@@ -581,6 +657,107 @@ function adminRoutes(d: ApiDeps) {
       });
     }
     return c.json({ ok: true, results });
+  });
+
+  // Assign an unattributed deposit (unknown sender) to a client, optionally registering the
+  // sender wallet, then re-drive it. Only possible after it was parked as UNATTRIBUTED (final).
+  a.post('/admin/deposits/:id/assign', async (c) => {
+    const id = c.req.param('id');
+    const b = z
+      .object({ clientId: z.string().uuid(), registerWallet: z.boolean().default(false) })
+      .safeParse(await c.req.json().catch(() => ({})));
+    if (!b.success) return c.json({ error: { code: 'VALIDATION', message: b.error.message } }, 400);
+    const dep = await d.db.query.deposits.findFirst({ where: eq(deposits.id, id) });
+    if (!dep) return c.json({ error: { code: 'NOT_FOUND', message: 'deposit not found' } }, 404);
+    if (dep.clientId || dep.status !== 'manual_review')
+      return c.json(
+        {
+          error: {
+            code: 'INVALID_STATUS',
+            message: 'only unattributed deposits in manual_review can be assigned',
+          },
+        },
+        409,
+      );
+    const client = await d.db.query.clients.findFirst({ where: eq(clients.id, b.data.clientId) });
+    if (!client) return c.json({ error: { code: 'NOT_FOUND', message: 'client not found' } }, 404);
+    const key = `${dep.workflowId}#retry-1`;
+    await d.db.transaction(async (tx) => {
+      await tx.update(deposits).set({ clientId: client.id }).where(eq(deposits.id, id));
+      if (b.data.registerWallet)
+        await tx
+          .insert(clientWallets)
+          .values({
+            clientId: client.id,
+            chainId: dep.chainId,
+            address: dep.fromAddress,
+            label: 'assigned by operator',
+            verifiedAt: new Date(),
+          })
+          .onConflictDoNothing();
+      await tx
+        .update(deposits)
+        .set({ status: 'dispatched', statusReason: `assigned to ${client.name} by admin` })
+        .where(eq(deposits.id, id));
+      await tx.insert(auditLog).values({
+        actor: 'admin',
+        action: 'admin_retry',
+        entity: 'deposit',
+        entityId: id,
+        data: { key, assignedTo: client.id, registerWallet: b.data.registerWallet },
+      });
+    });
+    const status = await d.submitWorkflow(key, id);
+    return c.json({ ok: true, workflowKey: key, restate: status });
+  });
+
+  // Exchange (Indodax) account view + treasury sweeps to Mopay's bank account.
+  a.get('/admin/exchange', async (c) => {
+    const shared = await sharedDepositAddress(d.db, d.chainId);
+    let account = null;
+    let sweeps: unknown[] = [];
+    try {
+      account = await d.indodax.account();
+      sweeps = await treasury.reconcile();
+    } catch (e) {
+      return c.json(json({ depositAddress: shared?.address ?? null, error: errMsg(e), sweeps }));
+    }
+    return c.json(
+      json({
+        depositAddress: shared?.address ?? null,
+        network: 'base',
+        account,
+        sweeps,
+        bank: { bankCode: d.env.MOPAY_BANK_CODE, accountNumber: d.env.MOPAY_BANK_ACCOUNT },
+      }),
+    );
+  });
+  a.post('/admin/treasury/sweep', async (c) => {
+    const b = z
+      .object({ amount: z.string().regex(/^\d+$/).optional() })
+      .safeParse(await c.req.json().catch(() => ({})));
+    if (!b.success) return c.json({ error: { code: 'VALIDATION', message: b.error.message } }, 400);
+    const acct = await d.indodax.account();
+    const free = BigInt(acct.balances.find((x) => x.asset === 'IDR')?.free ?? '0');
+    const amount = b.data.amount ? BigInt(b.data.amount) : free;
+    if (amount > free)
+      return c.json(
+        { error: { code: 'INSUFFICIENT_BALANCE', message: `exchange IDR balance is ${free}` } },
+        400,
+      );
+    try {
+      const row = await treasury.sweep(amount);
+      await d.db.insert(auditLog).values({
+        actor: 'admin',
+        action: 'treasury_sweep',
+        entity: 'treasury',
+        entityId: row!.id,
+        data: { amount: amount.toString() },
+      });
+      return c.json(json({ ok: true, sweep: row }));
+    } catch (e) {
+      return c.json({ error: { code: 'SWEEP_REJECTED', message: errMsg(e) } }, 400);
+    }
   });
 
   // Indexer passthrough (the dashboard shows these too)

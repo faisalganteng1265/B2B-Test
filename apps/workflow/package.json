@@ -26,6 +26,7 @@
     "@hono/node-server": "^2.1.11",
     "@mopay/bifast-mock": "workspace:*",
     "@mopay/indexer": "workspace:*",
+    "@mopay/indodax-mock": "workspace:*",
     "@mopay/mobee-mock": "workspace:*",
     "hono": "^4.13.21",
     "viem": "^2.58.4"

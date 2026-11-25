@@ -12,10 +12,17 @@ import {
 } from '@mopay/db';
 import {
   BifastClient,
+  BPS,
   feeIdr,
-  MobeeClient,
+  formatDecimal,
+  IndodaxClient,
+  IndodaxError,
+  indodaxClientId,
+  parseDecimal,
+  parseToken,
   payoutIdempotencyKey,
-  swapIdempotencyKey,
+  PriceFeed,
+  RATE_SCALE,
   UpstreamError,
   withCorrelation,
   type Logger,
@@ -26,8 +33,10 @@ export interface OfframpConfig extends StepConfig {
   /** minimum deposit in token base units */
   minAmountBaseUnits: bigint;
   feeBps: bigint;
-  /** re-quote attempts after QUOTE_EXPIRED before manual_review */
-  maxQuoteAttempts: number;
+  /** maximum accepted slippage of the actual sell vs the pre-trade VWAP (alert threshold) */
+  maxSlippageBps: bigint;
+  /** poll interval while waiting for fills to show up in myTrades */
+  fillPollMs: number;
   /** poll interval while waiting for the exchange to credit the deposit */
   creditPollMs: number;
   creditPollMaxMs: number;
@@ -37,7 +46,10 @@ export interface OfframpConfig extends StepConfig {
 
 export interface OfframpDeps {
   db: Db;
-  mobee: MobeeClient;
+  /** exchange (PAKD): INDODAX Trade API 2.0 */
+  indodax: IndodaxClient;
+  /** public Indodax order book, used for the pre-trade price check */
+  priceFeed: PriceFeed;
   bifast: BifastClient;
   cfg: OfframpConfig;
   log: Logger;
@@ -76,11 +88,11 @@ interface LoadedDeposit {
 const normName = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
 
 export function createOfframpWorkflow(deps: OfframpDeps) {
-  const { db, mobee, bifast, cfg } = deps;
+  const { db, indodax, priceFeed, bifast, cfg } = deps;
 
   return restate.workflow({
     name: 'offramp',
-    description: 'USDT deposit → swap to IDR on the exchange → BI-FAST payout',
+    description: 'USDT deposit → MARKET sell on Indodax (PAKD) → BI-FAST payout',
     handlers: {
       run: async (ctx: restate.WorkflowContext, input: OfframpInput): Promise<OfframpResult> => {
         const depositId = input.depositId;
@@ -106,24 +118,21 @@ export function createOfframpWorkflow(deps: OfframpDeps) {
             );
           });
 
-          // 3. wait-exchange-credit (durable sleep between polls, never a busy loop) --------
+          // 3. wait-exchange-credit: Indodax deposit history (durable sleep between polls) -----
           let pollDelay = cfg.creditPollMs;
           for (let i = 0; ; i++) {
             const credited = await step(
               s,
               'wait-exchange-credit',
               async () => {
-                const st = await mobee.depositStatus(d.txHash);
-                if (st.status === 'failed')
-                  throw terminal('DEPOSIT_TX_FAILED', 'exchange reports the tx as failed');
-                const mine = st.deposits.find((x) => x.logIndex === d.logIndex);
-                if (mine && mine.amount !== d.amount) {
-                  throw terminal(
-                    'AMOUNT_MISMATCH',
-                    `exchange credited ${mine.amount}, indexer saw ${d.amount}`,
-                  );
-                }
-                return mine?.status === 'credited';
+                const hist = await indodax.depositHistory(d.tokenSymbol, { limit: 1000 });
+                // hisrec has no log index: match by tx hash AND exact amount (base units)
+                const mine = hist.find(
+                  (x) => x.txId.toLowerCase() === d.txHash && parseToken(x.amount) === BigInt(d.amount),
+                );
+                if (mine?.status === 'failed')
+                  throw terminal('DEPOSIT_FAILED_AT_EXCHANGE', `exchange marked ${d.txHash} failed`);
+                return mine?.status === 'success';
               },
               `poll-exchange-credit-${i}`,
             );
@@ -132,64 +141,133 @@ export function createOfframpWorkflow(deps: OfframpDeps) {
             pollDelay = Math.min(cfg.creditPollMaxMs, Math.round(pollDelay * 1.5));
           }
 
-          // 4+5. lock-quote → confirm-swap (re-quote on QUOTE_EXPIRED, bounded) -----------
-          let order: { orderId: string; idrAmount: string; rateScaled: string } | null = null;
-          for (let q = 0; q < cfg.maxQuoteAttempts && !order; q++) {
-            const quote = await step(
+          // 4. price-check: Indodax has no quote lock, so we price the sell on the live bid book
+          //    (VWAP for this size) and set a slippage floor checked against the actual fills.
+          const priced = await step(
+            s,
+            'lock-quote',
+            async () => {
+              const r = await priceFeed.readForExecution(); // stale > 60 s → PRICE_UNAVAILABLE (retried)
+              const q = PriceFeed.quoteSell(r.snapshot, BigInt(d.amount)); // throws if the book is too thin (retried)
+              const floor = (q.vwapScaled * (BPS - cfg.maxSlippageBps)) / BPS;
+              await db
+                .update(offrampRuns)
+                .set({
+                  rateScaled: q.vwapScaled,
+                  priceAsOf: r.snapshot.asOf,
+                  priceSource: r.snapshot.source,
+                  quoteAttempts: 1,
+                  updatedAt: new Date(),
+                })
+                .where(eq(offrampRuns.depositId, depositId));
+              return {
+                expectedScaled: q.vwapScaled.toString(),
+                floorScaled: floor.toString(),
+                priceAsOf: r.snapshot.asOf.toISOString(),
+              };
+            },
+            'price-check',
+          );
+
+          // 5. sell: MARKET SELL with a deterministic newClientOrderId (≤ 36 chars). Indodax rejects
+          //    a reused id with -2010 "duplicate" instead of replaying, so after a lost response the
+          //    retry asks GET /order?origClientOrderId to prove the first attempt executed.
+          const clientOrderId = indodaxClientId(d.workflowId, 'sell');
+          const symbol = `${d.tokenSymbol}IDR`;
+          const quantity = formatDecimal(BigInt(d.amount), 6);
+          await step(
+            s,
+            'confirm-swap',
+            async () => {
+              try {
+                await indodax.createOrder({
+                  symbol,
+                  side: 'SELL',
+                  type: 'MARKET',
+                  quantity,
+                  newClientOrderId: clientOrderId,
+                });
+              } catch (e) {
+                if (!(e instanceof IndodaxError)) throw e;
+                if (e.isDuplicateClientId) {
+                  // Already placed by a previous attempt. It must exist (it may not be visible yet → retry).
+                  const o = await indodax.getOrder(symbol, { origClientOrderId: clientOrderId });
+                  log.info({ clientOrderId, status: o.status }, 'sell already placed by an earlier attempt');
+                } else if (e.indodaxCode === -2010 && /liquidity/i.test(e.message)) {
+                  throw new Error(`order book too thin: ${e.message}`); // retryable
+                } else if (e.indodaxCode === -2010) {
+                  throw terminal('SELL_REJECTED', e.message); // e.g. insufficient balance
+                } else throw e;
+              }
+              await db
+                .update(offrampRuns)
+                .set({ exchangeOrderId: clientOrderId, updatedAt: new Date() })
+                .where(eq(offrampRuns.depositId, depositId));
+            },
+            'place-sell',
+          );
+
+          // 5b. fills: poll myTrades until the whole quantity is filled (durable sleep in between)
+          let fills: { gross: string; commission: string; avgScaled: string } | null = null;
+          for (let i = 0; !fills; i++) {
+            fills = await step(
               s,
-              'lock-quote',
+              'confirm-swap',
               async () => {
-                const r = await mobee.lock(d.subAccountId, BigInt(d.amount));
-                await db
-                  .update(offrampRuns)
-                  .set({
-                    quoteId: r.quoteId,
-                    rateScaled: BigInt(r.rateScaled),
-                    priceAsOf: new Date(r.priceAsOf),
-                    priceSource: r.priceSource,
-                    quoteAttempts: q + 1,
-                    updatedAt: new Date(),
-                  })
-                  .where(eq(offrampRuns.depositId, depositId));
+                const trades = (await indodax.myTrades(symbol.toLowerCase(), { clientOrderId })).data;
+                const qty = trades.reduce((a, t) => a + parseDecimal(t.qty, 8), 0n);
+                if (qty < parseDecimal(quantity, 8)) {
+                  if (trades.length) {
+                    const o = await indodax.getOrder(symbol, { origClientOrderId: clientOrderId });
+                    if (o.status === 'CANCELLED' || o.status === 'REJECTED') {
+                      throw terminal(
+                        'PARTIAL_FILL',
+                        `order ${o.status} after filling ${formatDecimal(qty, 8)} of ${quantity}`,
+                      );
+                    }
+                  }
+                  return null; // not (fully) visible yet
+                }
+                const gross = trades.reduce((a, t) => a + BigInt(t.quoteQty), 0n);
+                const commission = trades.reduce((a, t) => a + BigInt(t.commission), 0n);
                 return {
-                  quoteId: r.quoteId,
-                  rateScaled: r.rateScaled,
-                  priceAsOf: r.priceAsOf,
-                  priceSource: r.priceSource,
+                  gross: gross.toString(),
+                  commission: commission.toString(),
+                  avgScaled: ((gross * RATE_SCALE * 1_000_000n) / BigInt(d.amount)).toString(),
                 };
               },
-              `lock-quote-${q}`,
+              `fills-${i}`,
             );
-            // Key per quote: Mobee records QUOTE_EXPIRED against the key, so a re-quote needs a
-            // fresh key. Safe: we only re-quote after a DEFINITIVE "not executed" answer.
-            const key =
-              q === 0 ? swapIdempotencyKey(d.workflowId) : `${swapIdempotencyKey(d.workflowId)}:${q}`;
-            try {
-              order = await step(
-                s,
-                'confirm-swap',
-                async () => {
-                  const o = await mobee.confirm(quote.quoteId, key);
-                  await db
-                    .update(offrampRuns)
-                    .set({ exchangeOrderId: o.orderId, updatedAt: new Date() })
-                    .where(eq(offrampRuns.depositId, depositId));
-                  return { orderId: o.orderId, idrAmount: o.idrAmount, rateScaled: o.rateScaled };
-                },
-                `confirm-swap-${q}`,
-              );
-            } catch (e) {
-              if (terminalCode(e) !== 'QUOTE_EXPIRED') throw e;
-              log.warn({ attempt: q + 1 }, 'quote expired; re-quoting');
-            }
+            if (!fills) await ctx.sleep(cfg.fillPollMs, 'fill-poll');
           }
-          if (!order) throw terminal('QUOTE_EXPIRED', `quote expired ${cfg.maxQuoteAttempts} times`);
+          if (BigInt(fills.avgScaled) < BigInt(priced.floorScaled)) {
+            // Already executed — cannot be undone. Record it loudly; the client is paid the real proceeds.
+            log.error(
+              { expected: priced.expectedScaled, actual: fills.avgScaled },
+              'ALERT: sell executed below the slippage floor',
+            );
+            await ctx.run('slippage-alert', () =>
+              db
+                .insert(auditLog)
+                .values({
+                  actor: 'workflow',
+                  action: 'slippage_alert',
+                  entity: 'deposit',
+                  entityId: depositId,
+                  data: { ...priced, actualScaled: fills!.avgScaled },
+                })
+                .then(() => undefined),
+            );
+          }
 
-          // 6. record-swap (ledger, integer math, fee rounded up) ---------------------------
+          // 6. record-swap: Mopay fee on gross (rounded up), exchange commission passed through.
+          const done = fills;
           const money = await step(s, 'record-swap', async () => {
-            const gross = BigInt(order.idrAmount);
+            const gross = BigInt(done.gross);
+            const exchangeFee = BigInt(done.commission);
             const fee = feeIdr(gross, cfg.feeBps);
-            const net = gross - fee;
+            const net = gross - exchangeFee - fee;
+            if (net <= 0n) throw terminal('NET_NOT_POSITIVE', `gross ${gross}, fees ${exchangeFee + fee}`);
             await db.transaction(async (tx) => {
               await postJournal(tx, {
                 id: `${depositId}:swap`,
@@ -198,14 +276,22 @@ export function createOfframpWorkflow(deps: OfframpDeps) {
                 lines: [
                   { account: 'client_usdt_liability', currency: d.tokenSymbol, debit: BigInt(d.amount) },
                   { account: 'exchange_usdt', currency: d.tokenSymbol, credit: BigInt(d.amount) },
-                  { account: 'exchange_idr', currency: 'IDR', debit: gross },
+                  // IDR actually credited at the exchange = gross − commission
+                  { account: 'exchange_idr', currency: 'IDR', debit: gross - exchangeFee },
                   { account: 'client_idr_payable', currency: 'IDR', credit: net },
                   ...(fee > 0n ? [{ account: 'fee_revenue' as const, currency: 'IDR', credit: fee }] : []),
                 ],
               });
               await tx
                 .update(offrampRuns)
-                .set({ grossIdr: gross, feeIdr: fee, idrAmount: net, updatedAt: new Date() })
+                .set({
+                  grossIdr: gross,
+                  exchangeFeeIdr: exchangeFee,
+                  feeIdr: fee,
+                  idrAmount: net,
+                  rateScaled: BigInt(done.avgScaled),
+                  updatedAt: new Date(),
+                })
                 .where(eq(offrampRuns.depositId, depositId));
             });
             return { gross: gross.toString(), fee: fee.toString(), net: net.toString() };
@@ -401,6 +487,7 @@ async function loadDeposit(
   } else if (d.status !== 'dispatched') {
     throw terminal('INVALID_STATUS', `deposit status is ${d.status}, expected confirmed|dispatched`);
   }
+  if (!d.clientId) throw terminal('UNATTRIBUTED', 'deposit is not assigned to a client');
   const c = await db.query.clients.findFirst({ where: eq(clients.id, d.clientId) });
   if (!c) throw terminal('CLIENT_NOT_FOUND', d.clientId);
   if (c.status !== 'active') throw terminal('CLIENT_SUSPENDED', c.id);

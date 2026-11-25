@@ -30,7 +30,7 @@ deploy:          ## deploy mock tokens to $$CHAIN (Base Sepolia), writes deploym
 reset:           ## stop everything and wipe local state (DB, Restate journal, mock state). Keeps deployments/.
 	./scripts/stack.sh down
 	psql -h localhost -U postgres -c 'drop database if exists mopay' -c 'create database mopay'
-	rm -rf data/restate data/mobee.sqlite* data/bifast.sqlite* data/seed-clients.json data/logs data/pids
+	rm -rf data/restate data/indodax.sqlite* data/mobee.sqlite* data/bifast.sqlite* data/seed-clients.json data/logs data/pids
 
 test-contracts:
 	cd contracts && forge test
@@ -78,8 +78,8 @@ db-create:       ## create local databases (native Postgres)
 	psql -h localhost -U postgres -tc "select 1 from pg_database where datname='mopay'" | grep -q 1 || psql -h localhost -U postgres -c 'create database mopay'
 	psql -h localhost -U postgres -tc "select 1 from pg_database where datname='mopay_test'" | grep -q 1 || psql -h localhost -U postgres -c 'create database mopay_test'
 
-mobee:           ## run mobee-mock (port 4100)
-	pnpm --filter @mopay/mobee-mock start
+indodax:         ## run indodax-mock, TAPIv2 (port 4100)
+	pnpm --filter @mopay/indodax-mock start
 
 bifast:          ## run bifast-mock (port 4200)
 	pnpm --filter @mopay/bifast-mock start

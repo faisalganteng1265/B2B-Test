@@ -7,7 +7,7 @@ import { getFinalizedBoundary, type FinalityConfig } from './finality';
 import { IndexerMetrics } from './metrics';
 import { fetchLogsAdaptive, splitRange } from './ranges';
 import { findCommonAncestor } from './reorg';
-import { AddressBook, IndexerStore } from './store';
+import { AddressBook, IndexerStore, UNATTRIBUTED_REASON } from './store';
 import type { BlockHeader, ChainSource, TransferLog } from './types';
 
 export interface IndexerOptions {
@@ -29,6 +29,8 @@ export interface IndexerOptions {
   housekeepingMs?: number;
   /** blocks of headers kept below the finalized boundary (reorg detection window) */
   pruneKeep?: number;
+  /** base delay for retrying a failed backfill chunk (exponential, capped at 30 s) */
+  chunkRetryBaseMs?: number;
   /** enqueue final-range reconciliation sweeps behind the live worker */
   sweeps?: boolean;
   workerId?: string;
@@ -74,6 +76,7 @@ export class Indexer {
       housekeepingMs: 5000,
       pruneKeep: opts.finality.reorgSafeDistance * 2,
       sweeps: true,
+      chunkRetryBaseMs: 1000,
       workerId: `idx-${process.pid}-${randomUUID().slice(0, 8)}`,
       ...opts,
     };
@@ -199,7 +202,7 @@ export class Indexer {
 
   private withClients(logs: TransferLog[]) {
     return logs.flatMap((log) => {
-      const a = this.addresses.get(log.to);
+      const a = this.addresses.attribute(log.to, log.from);
       return a ? [{ log, clientId: a.clientId }] : [];
     });
   }
@@ -352,6 +355,15 @@ export class Indexer {
         );
         continue;
       }
+      if (!d.clientId) {
+        if (await this.store.parkUnattributed(d.id, UNATTRIBUTED_REASON(d.fromAddress))) {
+          this.log.warn(
+            { correlationId: d.id, from: d.fromAddress },
+            'final deposit from an unregistered wallet: manual_review',
+          );
+        }
+        continue;
+      }
       if (await this.store.promote(d.id, d.blockHash)) {
         promoted++;
         this.log.info({ correlationId: d.id, block: d.blockNumber }, 'deposit confirmed (final)');
@@ -415,7 +427,7 @@ export class Indexer {
       );
       return true;
     } catch (e) {
-      const backoff = Math.min(30_000, 1000 * 2 ** Math.min(chunk.attempts, 5));
+      const backoff = Math.min(30_000, this.o.chunkRetryBaseMs * 2 ** Math.min(chunk.attempts, 5));
       await this.store.failChunk(chunk.id, workerId, errMsg(e), backoff);
       this.log.warn(
         { chunk: chunk.id, err: errMsg(e), attempts: chunk.attempts, backoffMs: backoff },

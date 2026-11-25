@@ -88,9 +88,9 @@ describe('auth (TAPIv2)', () => {
     const ts = 1_800_000_000_000;
     const qs = `timestamp=${ts}&recvWindow=5000`;
     const call = (h: Record<string, string>, q = qs) =>
-      s.app
-        .request(`http://x/api/v2/account?${q}`, { headers: h })
-        .then((r) => r.json() as Promise<{ code: number }>);
+      Promise.resolve(s.app.request(`http://x/api/v2/account?${q}`, { headers: h })).then(
+        (r: Response) => r.json() as Promise<{ code: number }>,
+      );
     expect((await call({})).code).toBe(-2014);
     expect((await call({ 'X-APIKEY': 'nope', Sign: indodaxSign(SECRET, qs) })).code).toBe(-1002);
     expect((await call({ 'X-APIKEY': KEY, Sign: indodaxSign('wrong', qs) })).code).toBe(-1022);

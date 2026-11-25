@@ -6,6 +6,7 @@ import clsx from 'clsx';
 import {
   ArrowLeftRight,
   BookOpenCheck,
+  Coins,
   Building2,
   Gauge,
   Moon,
@@ -21,6 +22,7 @@ const NAV: { href: string; label: string; icon: LucideIcon }[] = [
   { href: '/', label: 'Overview', icon: Gauge },
   { href: '/deposits', label: 'Deposits', icon: ArrowLeftRight },
   { href: '/clients', label: 'Clients', icon: Building2 },
+  { href: '/exchange', label: 'Exchange', icon: Coins },
   { href: '/ledger', label: 'Ledger', icon: BookOpenCheck },
   { href: '/chaos', label: 'Chaos lab', icon: Zap },
 ];
@@ -131,8 +133,8 @@ export function Shell({ children }: { children: ReactNode }) {
         <div className="mt-auto space-y-3 px-2">
           <div className="rounded-lg border border-border bg-surface-2/60 p-3 text-[11.5px] leading-relaxed text-ink-2">
             <div className="font-medium text-ink">Prototype</div>
-            Crypto custody &amp; swap: PAKD <span className="text-muted">(mock)</span>. IDR via BI-FAST: PJP{' '}
-            <span className="text-muted">(mock)</span>. Price: Indodax{' '}
+            Crypto custody &amp; swap: Indodax TAPIv2 <span className="text-muted">(mock)</span>. IDR via
+            BI-FAST: PJP <span className="text-muted">(mock)</span>. Price: Indodax{' '}
             <span className="text-muted">(real)</span>.
           </div>
         </div>

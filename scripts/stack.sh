@@ -8,10 +8,10 @@ ROOT=$(pwd)
 set -a; [ -f .env ] && source .env; set +a
 mkdir -p data/logs data/pids
 
-SERVICES=(restate mobee-mock bifast-mock workflow indexer api dashboard)
+SERVICES=(restate indodax-mock bifast-mock workflow indexer api dashboard)
 declare -A CMD=(
   [restate]="env RESTATE_LOG_FILTER=warn,restate=info $ROOT/node_modules/.bin/restate-server --listen-mode tcp --base-dir $ROOT/data/restate --node-name mopay"
-  [mobee-mock]="pnpm --filter @mopay/mobee-mock start"
+  [indodax-mock]="pnpm --filter @mopay/indodax-mock start"
   [bifast-mock]="pnpm --filter @mopay/bifast-mock start"
   [workflow]="pnpm --filter @mopay/workflow start"
   [indexer]="pnpm --filter @mopay/indexer start"
@@ -20,7 +20,7 @@ declare -A CMD=(
 )
 declare -A HEALTH=(
   [restate]="http://localhost:9070/health"
-  [mobee-mock]="http://localhost:4100/healthz"
+  [indodax-mock]="http://localhost:4100/healthz"
   [bifast-mock]="http://localhost:4200/healthz"
   [workflow]="tcp:9080"
   [indexer]="http://localhost:4300/healthz"
@@ -74,7 +74,7 @@ up() {
   pnpm -s db:migrate >/dev/null && echo "  ✓ migrations applied"
   [ -f "deployments/$(node -e 'console.log(process.env.CHAIN==="base"?8453:84532)').json" ] || ./scripts/deploy.sh
   start restate || exit 1
-  start mobee-mock || exit 1
+  start indodax-mock || exit 1
   start bifast-mock || exit 1
   start workflow || exit 1
   pnpm -s --filter @mopay/workflow register && echo "  ✓ workflow registered with Restate"

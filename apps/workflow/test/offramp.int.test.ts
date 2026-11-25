@@ -17,7 +17,7 @@ const H = new Harness();
 beforeAll(async () => H.start());
 afterAll(async () => H.stop());
 beforeEach(() => {
-  H.mobeeChaos.update({ FAIL_RATE: 0, FAIL_AFTER_RATE: 0, TIMEOUT_RATE: 0 });
+  H.exchangeChaos.update({ FAIL_RATE: 0, FAIL_AFTER_RATE: 0, TIMEOUT_RATE: 0 });
   H.bifastChaos.update({
     FAIL_RATE: 0,
     FAIL_AFTER_RATE: 0,
@@ -26,15 +26,17 @@ beforeEach(() => {
     FINAL_FAILURE_RATE: 0,
   });
   H.confirmDelayMs = 0;
-  H.mobeeDeps.quoteTtlMs = 30_000;
+  H.exchangeDeps.orderVisibilityDelayMs = 300;
 });
 
 const bankOf = async (depositId: string) => {
   const d = (await H.h.db.query.deposits.findFirst({ where: eq(deposits.id, depositId) }))!;
   return (await H.h.db.query.clientBankAccounts.findFirst({
-    where: eq(clientBankAccounts.clientId, d.clientId),
+    where: eq(clientBankAccounts.clientId, d.clientId!),
   }))!;
 };
+const exchangeOrders = () =>
+  (H.exchangeStore.db.prepare('SELECT count(*) AS n FROM orders').get() as { n: number }).n;
 const statusOf = async (id: string) =>
   (await H.h.db.query.deposits.findFirst({ where: eq(deposits.id, id) }))!;
 const done = (id: string) =>
@@ -52,15 +54,17 @@ describe('offramp workflow', () => {
 
     const run = (await H.h.db.query.offrampRuns.findFirst({ where: eq(offrampRuns.depositId, d.id) }))!;
     expect(run.step).toBe('completed');
-    expect(run.grossIdr).toBe(16_250_000n); // 1000 * 16250, VWAP at the top level of the fixed book
-    expect(run.feeIdr).toBe(56_875n); // 0.35%, rounded up
-    expect(run.idrAmount).toBe(16_193_125n);
+    expect(run.grossIdr).toBe(16_250_000n); // 1000 * 16250, filled at the top of the fixed bid book
+    expect(run.exchangeFeeIdr).toBe(66_625n); // Indodax commission 0.41% (fee + tax), rounded up
+    expect(run.feeIdr).toBe(56_875n); // Mopay 0.35% of gross, rounded up
+    expect(run.idrAmount).toBe(16_126_500n); // gross − exchange commission − Mopay fee
+    expect(run.exchangeOrderId).toMatch(/^mp[0-9a-f]{32}$/); // deterministic newClientOrderId
     expect(run.priceSource).toBe('fixed');
 
     const p = (await H.h.db.query.payouts.findFirst({ where: eq(payouts.depositId, d.id) }))!;
     expect(p).toMatchObject({
       status: 'success',
-      amountIdr: 16_193_125n,
+      amountIdr: 16_126_500n,
       idempotencyKey: `${d.workflowId}:payout`,
     });
 
@@ -73,7 +77,8 @@ describe('offramp workflow', () => {
     expect(bal('exchange_usdt', 'USDT')).toBe(0n);
     expect(bal('client_idr_payable', 'IDR')).toBe(0n);
     expect(bal('fee_revenue', 'IDR')).toBe(-56_875n);
-    expect(bal('bank_out', 'IDR')).toBe(-16_193_125n);
+    expect(bal('exchange_idr', 'IDR')).toBe(16_183_375n); // IDR credited at Indodax
+    expect(bal('bank_out', 'IDR')).toBe(-16_126_500n);
 
     const events = await H.h.db.select().from(offrampStepEvents).where(eq(offrampStepEvents.depositId, d.id));
     const succeeded = new Set(events.filter((e) => e.kind === 'succeeded').map((e) => e.step));
@@ -95,7 +100,7 @@ describe('offramp workflow', () => {
 
   it('ACCEPTANCE: 100 deposits with FAIL_RATE=0.3 on both mocks (plus lost responses, timeouts, duplicate/dropped callbacks and duplicate dispatches) all complete exactly once', async () => {
     const before = await H.invariants();
-    H.mobeeChaos.update({ FAIL_RATE: 0.3, FAIL_AFTER_RATE: 0.1, TIMEOUT_RATE: 0.03, TIMEOUT_MS: 2000 });
+    H.exchangeChaos.update({ FAIL_RATE: 0.3, FAIL_AFTER_RATE: 0.1, TIMEOUT_RATE: 0.03, TIMEOUT_MS: 2000 });
     H.bifastChaos.update({
       FAIL_RATE: 0.3,
       FAIL_AFTER_RATE: 0.1,
@@ -114,20 +119,20 @@ describe('offramp workflow', () => {
 
     const after = await H.invariants();
     log.info(
-      { before, after, mobeeChaos: H.mobeeChaos.stats, bifastChaos: H.bifastChaos.stats },
+      { before, after, exchangeChaos: H.exchangeChaos.stats, bifastChaos: H.bifastChaos.stats },
       'acceptance',
     );
     expect(after.unbalancedJournals).toBe(0);
     expect(after.completed - before.completed).toBe(100);
     expect(after.payouts - before.payouts).toBe(100);
     expect(after.payoutsSuccess).toBe(after.completed); // count(payouts) = count(completed)
-    expect(after.mobeeOrders - before.mobeeOrders).toBe(100); // exactly one swap per deposit
-    expect(after.duplicateOrdersPerQuote).toBe(0);
+    expect(after.exchangeOrders - before.exchangeOrders).toBe(100); // exactly one sell per deposit
+    expect(after.exchangeOrders).toBe(after.runsWithSell);
     expect(after.bifastTransfers).toBe(after.bifastDistinctKeys); // one transfer per idempotency key
     expect(after.bifastTransfers - before.bifastTransfers).toBe(100);
     // chaos actually happened
-    expect(H.mobeeChaos.stats.failedBefore).toBeGreaterThan(10);
-    expect(H.mobeeChaos.stats.failedAfter).toBeGreaterThan(0);
+    expect(H.exchangeChaos.stats.failedBefore).toBeGreaterThan(10);
+    expect(H.exchangeChaos.stats.failedAfter).toBeGreaterThan(0);
     expect(H.bifastChaos.stats.failedBefore).toBeGreaterThan(10);
     const retries = await H.h.db
       .select({ n: sql<number>`count(*)::int` })
@@ -166,7 +171,7 @@ describe('offramp workflow', () => {
   });
 
   it('killing the workflow service in the middle of confirm-swap resumes from the journal without a second swap', async () => {
-    const ordersBefore = H.mobeeStore.orderCount();
+    const ordersBefore = exchangeOrders();
     H.confirmDelayMs = 1500;
     const d = await H.createDeposit(1, 50_000_000n);
     await H.submit(d.workflowId, d.id);
@@ -178,13 +183,13 @@ describe('offramp workflow', () => {
       60_000,
       20,
     );
-    await H.killWorkflow(); // crash while mobee is executing the swap
+    await H.killWorkflow(); // crash while the exchange is executing the sell
     await new Promise((r) => setTimeout(r, 2500));
     H.confirmDelayMs = 0;
     H.startWorkflow(); // restart: Restate re-invokes and replays the journal
     const final = await done(d.id);
     expect(final.status).toBe('completed');
-    expect(H.mobeeStore.orderCount() - ordersBefore).toBe(1);
+    expect(exchangeOrders() - ordersBefore).toBe(1);
     const locks = await H.h.db
       .select({ n: sql<number>`count(*)::int` })
       .from(offrampStepEvents)
@@ -198,19 +203,15 @@ describe('offramp workflow', () => {
     expect(Number(locks[0]!.n)).toBe(1); // journaled: the quote was not re-locked after the crash
   });
 
-  it('re-quotes on QUOTE_EXPIRED and goes to manual_review after the limit, without swapping', async () => {
-    const ordersBefore = H.mobeeStore.orderCount();
-    H.mobeeDeps.quoteTtlMs = 100;
-    H.confirmDelayMs = 300;
+  it('orders that are not yet visible and lost order responses are reconciled by clientOrderId: one sell, completed', async () => {
+    const ordersBefore = exchangeOrders();
+    H.exchangeDeps.orderVisibilityDelayMs = 2500; // docs: an order may not be immediately available
+    H.exchangeChaos.update({ FAIL_AFTER_RATE: 0.5 }); // half of all responses are lost after processing
     const d = await H.createDeposit(0, 20_000_000n);
     await H.submit(d.workflowId, d.id);
     const final = await done(d.id);
-    expect(final.status).toBe('manual_review');
-    expect(final.statusReason).toMatch(/QUOTE_EXPIRED/);
-    const run = (await H.h.db.query.offrampRuns.findFirst({ where: eq(offrampRuns.depositId, d.id) }))!;
-    expect(run.quoteAttempts).toBe(5);
-    expect(H.mobeeStore.orderCount()).toBe(ordersBefore);
-    expect(await H.h.db.query.payouts.findFirst({ where: eq(payouts.depositId, d.id) })).toBeUndefined();
+    expect(final.status).toBe('completed');
+    expect(exchangeOrders() - ordersBefore).toBe(1);
   });
 
   it('a final bank reject (ACCOUNT_CLOSED) is not retried; funds stay in client_idr_payable; manual_review', async () => {

@@ -3,6 +3,7 @@ import {
   auditLog,
   backfillChunks,
   chainBlocks,
+  clientWallets,
   depositAddresses,
   deposits,
   indexerCheckpoints,
@@ -13,28 +14,56 @@ import { depositWorkflowId } from '@mopay/shared';
 import type { BlockHeader, TransferLog } from './types';
 
 export interface AddressInfo {
-  clientId: string;
+  clientId: string | null;
 }
 
+export const UNATTRIBUTED_REASON = (from: string) =>
+  `UNATTRIBUTED: sender ${from} is not a registered client wallet; assign the deposit to a client to process it`;
+
 /** Deposit address → client, refreshed periodically (new addresses can be created via the API). */
+/**
+ * Which deposits we watch and who they belong to.
+ *  - `client` address (one per client, e.g. Mobee sub-accounts): the destination identifies the client.
+ *  - `shared` address (Indodax: one per exchange account): the SENDER identifies the client, via the
+ *    wallets each client registered (KYB). Unknown sender → clientId null (never processed until assigned).
+ */
 export class AddressBook {
-  private map = new Map<string, AddressInfo>();
+  private addresses = new Map<string, { kind: 'client' | 'shared'; clientId: string | null }>();
+  private wallets = new Map<string, string>();
   constructor(
     private readonly db: Db,
     private readonly chainId: number,
   ) {}
   async refresh() {
     const rows = await this.db
-      .select({ address: depositAddresses.address, clientId: depositAddresses.clientId })
+      .select({
+        address: depositAddresses.address,
+        clientId: depositAddresses.clientId,
+        kind: depositAddresses.kind,
+      })
       .from(depositAddresses)
       .where(eq(depositAddresses.chainId, this.chainId));
-    this.map = new Map(rows.map((r) => [r.address.toLowerCase(), { clientId: r.clientId }]));
+    this.addresses = new Map(
+      rows.map((r) => [
+        r.address.toLowerCase(),
+        { kind: r.kind === 'shared' ? 'shared' : 'client', clientId: r.clientId },
+      ]),
+    );
+    const ws = await this.db
+      .select({ address: clientWallets.address, clientId: clientWallets.clientId })
+      .from(clientWallets)
+      .where(eq(clientWallets.chainId, this.chainId));
+    this.wallets = new Map(ws.map((w) => [w.address.toLowerCase(), w.clientId]));
   }
-  get(addr: string) {
-    return this.map.get(addr.toLowerCase());
+  /** undefined = not a deposit to us; { clientId: null } = ours but sender unknown. */
+  attribute(to: string, from: string): AddressInfo | undefined {
+    const a = this.addresses.get(to.toLowerCase());
+    if (!a) return undefined;
+    if (a.kind === 'client') return { clientId: a.clientId };
+    return { clientId: this.wallets.get(from.toLowerCase()) ?? null };
   }
   list() {
-    return [...this.map.keys()];
+    return [...this.addresses.keys()];
   }
 }
 
@@ -115,7 +144,7 @@ export class IndexerStore {
 
   private depositRow(
     l: TransferLog,
-    clientId: string,
+    clientId: string | null,
     source: 'live' | 'backfill',
     status: 'seen' | 'confirmed',
   ) {
@@ -145,7 +174,7 @@ export class IndexerStore {
    */
   async ingestLiveBatch(
     blocks: BlockHeader[],
-    logs: { log: TransferLog; clientId: string }[],
+    logs: { log: TransferLog; clientId: string | null }[],
     expectedPrev: number,
     head: number,
   ) {
@@ -176,7 +205,7 @@ export class IndexerStore {
   }
 
   /** Insert a live-observed deposit, or resurrect an orphaned one re-included in a new block. */
-  private async upsertSeen(tx: Tx, log: TransferLog, clientId: string): Promise<number> {
+  private async upsertSeen(tx: Tx, log: TransferLog, clientId: string | null): Promise<number> {
     const ins = await tx
       .insert(deposits)
       .values(this.depositRow(log, clientId, 'live', 'seen'))
@@ -207,11 +236,43 @@ export class IndexerStore {
    * Backfill path: logs from a FINAL range go straight to `confirmed` (the outbox).
    * Existing rows: seen → confirmed (with the canonical block info), orphaned → seen → confirmed.
    */
-  async upsertFinal(logs: { log: TransferLog; clientId: string }[]): Promise<number> {
+  async upsertFinal(logs: { log: TransferLog; clientId: string | null }[]): Promise<number> {
     if (!logs.length) return 0;
     return this.db.transaction(async (tx) => {
       let n = 0;
       for (const { log, clientId } of logs) {
+        if (clientId === null) {
+          // Final but unattributed: record for an operator, never confirm (DB CHECK enforces this too).
+          const ins = await tx
+            .insert(deposits)
+            .values({
+              ...this.depositRow(log, null, 'backfill', 'seen'),
+              status: 'manual_review',
+              statusReason: UNATTRIBUTED_REASON(log.from),
+            })
+            .onConflictDoNothing()
+            .returning({ id: deposits.id });
+          if (!ins.length) {
+            await tx
+              .update(deposits)
+              .set({
+                status: 'manual_review',
+                statusReason: UNATTRIBUTED_REASON(log.from),
+                blockHash: log.blockHash,
+                blockNumber: log.blockNumber,
+              })
+              .where(
+                and(
+                  eq(deposits.chainId, this.chainId),
+                  eq(deposits.txHash, log.txHash),
+                  eq(deposits.logIndex, log.logIndex),
+                  eq(deposits.status, 'seen'),
+                ),
+              );
+          }
+          n++;
+          continue;
+        }
         const ins = await tx
           .insert(deposits)
           .values(this.depositRow(log, clientId, 'backfill', 'confirmed'))
@@ -234,7 +295,7 @@ export class IndexerStore {
             .set({ status: 'seen', statusReason: 'REINCLUDED_AFTER_REORG' })
             .where(key);
         }
-        if (existing.status === 'orphaned' || existing.status === 'seen') {
+        if ((existing.status === 'orphaned' || existing.status === 'seen') && existing.clientId) {
           await tx
             .update(deposits)
             .set({
@@ -503,6 +564,16 @@ export class IndexerStore {
       .update(deposits)
       .set({ status: 'confirmed', confirmedAt: new Date() })
       .where(and(eq(deposits.id, id), eq(deposits.status, 'seen'), eq(deposits.blockHash, blockHash)))
+      .returning({ id: deposits.id });
+    return r.length === 1;
+  }
+
+  /** Final + canonical but no client: park it for an operator (seen → manual_review). */
+  async parkUnattributed(id: string, reason: string) {
+    const r = await this.db
+      .update(deposits)
+      .set({ status: 'manual_review', statusReason: reason })
+      .where(and(eq(deposits.id, id), eq(deposits.status, 'seen')))
       .returning({ id: deposits.id });
     return r.length === 1;
   }

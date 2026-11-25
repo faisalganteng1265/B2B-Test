@@ -1,6 +1,14 @@
 'use client';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { ChaosState, ClientRow, DepositDetail, Deposit, LedgerOverview, Overview } from './types';
+import type {
+  ChaosState,
+  ClientRow,
+  DepositDetail,
+  Deposit,
+  ExchangeView,
+  LedgerOverview,
+  Overview,
+} from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -32,6 +40,7 @@ export const qk = {
   clients: ['clients'] as const,
   ledger: ['ledger'] as const,
   chaos: ['chaos'] as const,
+  exchange: ['exchange'] as const,
 };
 
 export const useOverview = () =>
@@ -71,7 +80,9 @@ export const useChaos = () =>
   useQuery({
     queryKey: qk.chaos,
     queryFn: () =>
-      api<{ mobee: ChaosState | { error: string }; bifast: ChaosState | { error: string } }>('admin/chaos'),
+      api<{ exchange: ChaosState | { error: string }; bifast: ChaosState | { error: string } }>(
+        'admin/chaos',
+      ),
     refetchInterval: 3000,
   });
 
@@ -103,8 +114,42 @@ export function useSendDemo() {
 export function useSetChaos() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ target, patch }: { target: 'mobee' | 'bifast'; patch: Record<string, number> }) =>
+    mutationFn: ({ target, patch }: { target: 'exchange' | 'bifast'; patch: Record<string, number> }) =>
       api<ChaosState>(`admin/chaos/${target}`, { method: 'POST', body: JSON.stringify(patch) }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: qk.chaos }),
+  });
+}
+
+export const useExchange = () =>
+  useQuery({
+    queryKey: qk.exchange,
+    queryFn: () => api<ExchangeView>('admin/exchange'),
+    refetchInterval: 5000,
+  });
+
+export function useSweep() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (amount?: string) =>
+      api<{ ok: true }>('admin/treasury/sweep', {
+        method: 'POST',
+        body: JSON.stringify(amount ? { amount } : {}),
+      }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: qk.exchange }),
+  });
+}
+
+export function useAssignDeposit() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (b: { id: string; clientId: string; registerWallet: boolean }) =>
+      api<{ workflowKey: string }>(`admin/deposits/${b.id}/assign`, {
+        method: 'POST',
+        body: JSON.stringify({ clientId: b.clientId, registerWallet: b.registerWallet }),
+      }),
+    onSuccess: (_d, b) => {
+      void qc.invalidateQueries({ queryKey: qk.deposit(b.id) });
+      void qc.invalidateQueries({ queryKey: ['deposits'] });
+    },
   });
 }

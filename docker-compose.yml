@@ -10,12 +10,12 @@ x-node: &node
     DATABASE_URL: postgres://postgres:postgres@postgres:5432/mopay
     RESTATE_INGRESS_URL: http://restate:8080
     RESTATE_ADMIN_URL: http://restate:9070
-    MOBEE_URL: http://mobee-mock:4100
+    INDODAX_URL: http://indodax-mock:4100
     BIFAST_URL: http://bifast-mock:4200
     API_URL: http://api:4000
     INDEXER_URL: http://indexer:4300
     BIFAST_CALLBACK_URL: http://api:4000/webhooks/bifast
-    MOBEE_DB_PATH: /data/mobee.sqlite
+    INDODAX_DB_PATH: /data/indodax.sqlite
     BIFAST_DB_PATH: /data/bifast.sqlite
     WORKFLOW_PUBLIC_URL: http://workflow:9080
     LOG_LEVEL: info
@@ -40,9 +40,9 @@ services:
     ports: ['8080:8080', '9070:9070']
     healthcheck: { <<: *health, test: ['CMD', 'curl', '-sf', 'http://localhost:9070/health'] }
 
-  mobee-mock:
+  indodax-mock:
     <<: *node
-    command: pnpm --filter @mopay/mobee-mock start
+    command: pnpm --filter @mopay/indodax-mock start
     volumes: [mockdata:/data]
     ports: ['4100:4100']
     healthcheck: { <<: *health, test: ['CMD', 'curl', '-sf', 'http://localhost:4100/healthz'] }
@@ -71,7 +71,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       restate: { condition: service_healthy }
-      mobee-mock: { condition: service_healthy }
+      indodax-mock: { condition: service_healthy }
       workflow: { condition: service_healthy }
     healthcheck: { disable: true }
 

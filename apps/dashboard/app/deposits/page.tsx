@@ -134,7 +134,9 @@ function DepositsInner() {
                     )}
                   >
                     <td className="max-w-[200px] px-4 py-2.5">
-                      <div className="truncate font-medium">{d.clientName}</div>
+                      <div className="truncate font-medium">
+                        {d.clientName ?? <Pill tone="warning">Unattributed sender</Pill>}
+                      </div>
                       {d.source === 'backfill' && (
                         <div className="text-[10.5px] text-muted">via backfill</div>
                       )}

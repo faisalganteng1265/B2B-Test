@@ -66,19 +66,32 @@ const stuckOutbox = await one(
 check('Outbox drains (no confirmed deposit stuck > 5 min)', stuckOutbox === 0, `${stuckOutbox} stuck`);
 
 const swapsInDb = await one(sql`SELECT count(*) FROM offramp_runs WHERE exchange_order_id IS NOT NULL`);
-const mobee = await getJson(`${env.MOBEE_URL}/__state`);
-if (mobee) {
+const dupSellIds = await one(
+  sql`SELECT count(*) FROM (SELECT exchange_order_id FROM offramp_runs WHERE exchange_order_id IS NOT NULL GROUP BY 1 HAVING count(*) > 1) x`,
+);
+check(
+  'Exchange: one sell order id per deposit (deterministic newClientOrderId)',
+  dupSellIds === 0,
+  `${dupSellIds} shared ids`,
+);
+const exchange = await getJson(`${env.INDODAX_URL}/__state`);
+if (exchange) {
+  // the exchange enforces UNIQUE(newClientOrderId), so equal counts = exactly one sell per swapped deposit
   check(
-    'Exchange: no quote executed twice',
-    mobee.duplicateOrdersPerQuote === 0,
-    `${mobee.duplicateOrdersPerQuote} duplicates`,
+    'Exchange: exactly one sell per swapped deposit',
+    exchange.orders === swapsInDb,
+    `${exchange.orders} orders at Indodax, ${swapsInDb} deposits sold`,
   );
-  check(
-    'Exchange: exactly one swap per swapped deposit',
-    mobee.orders === swapsInDb,
-    `${mobee.orders} orders at exchange, ${swapsInDb} deposits swapped`,
-  );
-} else check('Exchange state reachable', false, 'mobee-mock /__state unreachable');
+} else check('Exchange state reachable', false, 'indodax-mock /__state unreachable');
+
+const unattributedTouched = await one(
+  sql`SELECT count(*) FROM deposits d WHERE d.client_id IS NULL AND (d.status NOT IN ('seen','orphaned','manual_review') OR EXISTS (SELECT 1 FROM offramp_runs r WHERE r.deposit_id = d.id))`,
+);
+check(
+  'Deposits from unregistered wallets are never processed',
+  unattributedTouched === 0,
+  `${unattributedTouched} violations`,
+);
 
 const payouts = await one(sql`SELECT count(*) FROM payouts WHERE bifast_ref IS NOT NULL`);
 const bifast = await getJson(`${env.BIFAST_URL}/__state`);

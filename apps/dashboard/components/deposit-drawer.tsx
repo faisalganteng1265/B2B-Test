@@ -1,5 +1,5 @@
 'use client';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import {
   AlertTriangle,
@@ -12,7 +12,7 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
-import { useDeposit, useRetryDeposit } from '@/lib/api';
+import { useAssignDeposit, useClients, useDeposit, useRetryDeposit } from '@/lib/api';
 import { ago, duration, fromBase, idr, num, rate, short, time, usdt } from '@/lib/format';
 import type { DepositDetail, TimelineStep } from '@/lib/types';
 import { Button, CopyText, ErrorNote, Pill, Skeleton, StatusBadge } from './ui';
@@ -24,12 +24,18 @@ const STEP_LABEL: Record<string, { title: string; desc: string }> = {
   },
   'record-received': { title: 'Record receipt', desc: 'Ledger: USDT owed to client, held at exchange' },
   'wait-exchange-credit': {
-    title: 'Exchange credit',
-    desc: 'Wait until the PAKD credits the deposit (durable sleep)',
+    title: 'Indodax credit',
+    desc: 'Deposit history (capital/deposit/hisrec) shows success; durable sleep between polls',
   },
-  'lock-quote': { title: 'Lock quote', desc: 'VWAP on the live Indodax bid book, 30 s TTL' },
-  'confirm-swap': { title: 'Execute swap', desc: 'Idempotency-Key = workflow id + :swap' },
-  'record-swap': { title: 'Record swap', desc: 'Ledger: USDT → IDR, 0.35% fee (rounded up)' },
+  'lock-quote': {
+    title: 'Price check',
+    desc: 'VWAP on the live Indodax bid book + slippage floor (no quote lock on Indodax)',
+  },
+  'confirm-swap': {
+    title: 'Sell on Indodax',
+    desc: 'MARKET SELL, newClientOrderId = hash(workflow id); fills from myTrades',
+  },
+  'record-swap': { title: 'Record swap', desc: 'Ledger: USDT → IDR, Indodax commission + 0.35% Mopay fee' },
   'account-inquiry': { title: 'Account inquiry', desc: 'BI-FAST name check against our records' },
   'create-payout': { title: 'Create payout', desc: 'Payout row + awakeable stored before the transfer' },
   'await-payout-result': {
@@ -140,11 +146,12 @@ function Money({ d }: { d: DepositDetail }) {
   const rows: [string, string, string?][] = [
     ['Received', `${usdt(d.amount)} ${d.token}`],
     [
-      'Rate (VWAP, Indodax bid)',
+      'Rate (avg fill, Indodax)',
       o?.rate ? `Rp ${rate(o.rate)}` : '—',
       o?.priceAsOf ? `price as of ${time(o.priceAsOf)}` : undefined,
     ],
     ['Gross', idr(o?.grossIdr)],
+    ['Indodax commission (fee + tax)', o?.exchangeFeeIdr ? `− ${idr(o.exchangeFeeIdr)}` : '—'],
     ['Mopay fee 0.35%', o?.feeIdr ? `− ${idr(o.feeIdr)}` : '—'],
   ];
   return (
@@ -172,6 +179,50 @@ function Money({ d }: { d: DepositDetail }) {
       {o?.quoteAttempts && o.quoteAttempts > 1 ? (
         <div className="mt-1 text-[11px] text-serious-ink">re-quoted {o.quoteAttempts}× (quote expired)</div>
       ) : null}
+    </div>
+  );
+}
+
+function AssignPanel({ depositId, from }: { depositId: string; from: string }) {
+  const { data: clients } = useClients();
+  const assign = useAssignDeposit();
+  const [clientId, setClientId] = useState('');
+  const [register, setRegister] = useState(true);
+  return (
+    <div className="space-y-2.5 rounded-lg border border-border bg-surface-2/50 p-3">
+      <div className="text-[12.5px] text-ink-2">
+        Sent from <span className="font-mono text-[11.5px] text-ink">{short(from, 10, 6)}</span>, which is not
+        a registered wallet of any client. Confirm who owns it (e.g. by asking the client for a signed
+        message), then assign:
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={clientId}
+          onChange={(e) => setClientId(e.target.value)}
+          className="h-8 min-w-0 flex-1 rounded-lg border border-border bg-bg px-2 text-[12.5px]"
+          aria-label="Client"
+        >
+          <option value="">Select client…</option>
+          {clients?.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={!clientId || assign.isPending}
+          onClick={() => assign.mutate({ id: depositId, clientId, registerWallet: register })}
+        >
+          Assign &amp; process
+        </Button>
+      </div>
+      <label className="flex items-center gap-2 text-[12px] text-ink-2">
+        <input type="checkbox" checked={register} onChange={(e) => setRegister(e.target.checked)} /> Also
+        register this wallet for the client
+      </label>
+      <ErrorNote error={assign.error} />
     </div>
   );
 }
@@ -228,21 +279,24 @@ export function DepositDrawer({ id, onClose }: { id: string | null; onClose: () 
                   <div className="min-w-0 flex-1 break-words">{d.statusReason}</div>
                 </div>
               )}
-              {d.status === 'manual_review' && !(d.statusReason ?? '').startsWith('INCIDENT') && (
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    disabled={retry.isPending}
-                    onClick={() => retry.mutate(d.id)}
-                  >
-                    <RotateCcw className="size-3.5" aria-hidden /> Re-drive workflow
-                  </Button>
-                  <span className="text-[11.5px] text-muted">
-                    Reuses the same swap/payout idempotency keys — cannot pay twice.
-                  </span>
-                </div>
-              )}
+              {d.status === 'manual_review' && !d.clientId && <AssignPanel depositId={d.id} from={d.from} />}
+              {d.status === 'manual_review' &&
+                d.clientId &&
+                !(d.statusReason ?? '').startsWith('INCIDENT') && (
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      disabled={retry.isPending}
+                      onClick={() => retry.mutate(d.id)}
+                    >
+                      <RotateCcw className="size-3.5" aria-hidden /> Re-drive workflow
+                    </Button>
+                    <span className="text-[11.5px] text-muted">
+                      Reuses the same swap/payout idempotency keys — cannot pay twice.
+                    </span>
+                  </div>
+                )}
               <ErrorNote error={retry.error} />
               {d.status === 'orphaned' && (
                 <div className="rounded-lg border border-border bg-surface-2/50 px-3 py-2 text-[12px] text-ink-2">

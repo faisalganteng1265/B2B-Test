@@ -1,6 +1,6 @@
 import * as restate from '@restatedev/restate-sdk';
 import { createDb } from '@mopay/db';
-import { BifastClient, createLogger, MobeeClient } from '@mopay/shared';
+import { BifastClient, createLogger, IndodaxClient, PriceFeed } from '@mopay/shared';
 import { loadWorkflowEnv, offrampConfigFromEnv } from './config';
 import { createOfframpWorkflow } from './offramp';
 
@@ -10,12 +10,13 @@ const log = createLogger('workflow', env.LOG_LEVEL);
 const db = createDb(env.DATABASE_URL, { max: 20, appName: 'workflow' });
 const offramp = createOfframpWorkflow({
   db: db.db,
-  mobee: new MobeeClient({
-    baseUrl: env.MOBEE_URL,
-    apiKey: env.MOBEE_API_KEY,
-    apiSecret: env.MOBEE_API_SECRET,
+  indodax: new IndodaxClient({
+    baseUrl: env.INDODAX_URL,
+    apiKey: env.INDODAX_API_KEY,
+    apiSecret: env.INDODAX_API_SECRET,
     timeoutMs: env.UPSTREAM_TIMEOUT_MS,
   }),
+  priceFeed: new PriceFeed({ source: env.PRICE_SOURCE, fixedRate: env.PRICE_FIXED_RATE }),
   bifast: new BifastClient({
     baseUrl: env.BIFAST_URL,
     apiKey: env.BIFAST_API_KEY,

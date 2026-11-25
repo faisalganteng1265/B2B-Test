@@ -2,9 +2,10 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { CHAINS, envFields, loadEnv, repoRoot } from '@mopay/config';
-import { BANK_DIRECTORY, generateApiKey } from '@mopay/shared';
+import { z } from 'zod';
+import { BANK_DIRECTORY, generateApiKey, IndodaxClient } from '@mopay/shared';
 import { createDb, type Db } from './client';
-import { clientBankAccounts, clients, depositAddresses } from './schema';
+import { clientBankAccounts, clients, clientWallets, depositAddresses } from './schema';
 
 export interface SeedClient {
   name: string;
@@ -53,16 +54,88 @@ export async function seed(db: Db, chainId: number, addressFor: AddressProvider)
   return created;
 }
 
+/**
+ * Indodax model: ONE shared deposit address (Mopay's exchange account) and, per client, the wallets
+ * it registered (KYB) as senders. Idempotent: re-running only adds what is missing.
+ */
+export async function seedIndodax(db: Db, chainId: number, sharedAddress: string, wallets: string[]) {
+  const created: { name: string; apiKey: string; clientId: string; wallet: string | null }[] = [];
+  await db
+    .insert(depositAddresses)
+    .values({
+      clientId: null,
+      chainId,
+      address: sharedAddress.toLowerCase(),
+      source: 'indodax',
+      kind: 'shared',
+    })
+    .onConflictDoNothing();
+  for (const [i, c] of SEED_CLIENTS.entries()) {
+    let row = await db.query.clients.findFirst({ where: eq(clients.exchangeSubaccount, c.subaccount) });
+    if (!row) {
+      const k = generateApiKey();
+      row = await db.transaction(async (tx) => {
+        const [r] = await tx
+          .insert(clients)
+          .values({
+            name: c.name,
+            apiKeyHash: k.hash,
+            apiKeySalt: k.salt,
+            apiKeyPrefix: k.prefix,
+            exchangeSubaccount: c.subaccount,
+          })
+          .returning();
+        await tx.insert(clientBankAccounts).values({ clientId: r!.id, ...c.bank, verifiedAt: new Date() });
+        return r!;
+      });
+      created.push({ name: c.name, apiKey: k.key, clientId: row.id, wallet: wallets[i] ?? null });
+    }
+    const w = wallets[i];
+    if (w) {
+      await db
+        .insert(clientWallets)
+        .values({
+          clientId: row.id,
+          chainId,
+          address: w.toLowerCase(),
+          label: 'treasury wallet (KYB)',
+          verifiedAt: new Date(),
+        })
+        .onConflictDoNothing();
+    }
+  }
+  return created;
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const env = loadEnv({
     DATABASE_URL: envFields.DATABASE_URL,
     CHAIN: envFields.CHAIN,
-    MOBEE_URL: envFields.MOBEE_URL,
+    INDODAX_URL: envFields.INDODAX_URL,
+    INDODAX_API_KEY: envFields.INDODAX_API_KEY,
+    INDODAX_API_SECRET: envFields.INDODAX_API_SECRET,
+    CLIENT_WALLETS: z
+      .string()
+      .default('')
+      .transform((s) =>
+        s
+          .split(',')
+          .map((x) => x.trim())
+          .filter(Boolean),
+      ),
   });
   const chainId = CHAINS[env.CHAIN].chainId;
   const h = createDb(env.DATABASE_URL, { max: 2, appName: 'seed' });
-  const { mobeeAddressProvider } = await import('./seed-mobee');
-  const created = await seed(h.db, chainId, await mobeeAddressProvider(env.MOBEE_URL, chainId));
+  // The deposit address is issued by the exchange: GET /api/v2/capital/deposit/address/list
+  const indodax = new IndodaxClient({
+    baseUrl: env.INDODAX_URL,
+    apiKey: env.INDODAX_API_KEY,
+    apiSecret: env.INDODAX_API_SECRET,
+  });
+  const [addr] = await indodax.depositAddresses('USDT', 'base');
+  if (!addr?.address) throw new Error('exchange returned no USDT deposit address');
+  const created = await seedIndodax(h.db, chainId, addr.address, env.CLIENT_WALLETS);
+  console.log(`exchange deposit address (shared): ${addr.address}`);
   // Plaintext keys are written only to the gitignored data/ dir, merged with earlier runs.
   const dir = join(repoRoot(), 'data');
   mkdirSync(dir, { recursive: true });

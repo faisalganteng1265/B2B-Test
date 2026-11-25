@@ -69,16 +69,25 @@ export default function ClientsPage() {
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="text-[11.5px] text-muted">
-                        USDT deposit address · Base Sepolia · issued by exchange
+                        Registered sender wallets (KYB) · deposits are attributed by sender
                       </div>
-                      {addr ? (
-                        <CopyText value={addr.address} className="mt-0.5 text-[12.5px]" />
+                      {c.wallets.length ? (
+                        c.wallets.map((w) => (
+                          <CopyText key={w.address} value={w.address} className="mt-0.5 text-[12.5px]" />
+                        ))
                       ) : (
-                        <span className="text-muted">none</span>
+                        <div className="mt-0.5 text-[12px] text-warning-ink">
+                          none: deposits from this client will be held for review
+                        </div>
                       )}
-                      <div className="mt-0.5 text-[11px] text-muted">
-                        sub-account <span className="font-mono">{c.subAccountId}</span>
-                      </div>
+                      {addr ? null : (
+                        <div className="mt-1 text-[11px] text-muted">
+                          sends to the shared Indodax address{' '}
+                          {c.sharedDepositAddress && (
+                            <span className="font-mono">{short(c.sharedDepositAddress, 8, 6)}</span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-start gap-3">
